@@ -23,20 +23,23 @@ print(result["expr"])  # → ln(x)
 ## How it works
 
 A full binary tree of depth *n* has 2ⁿ leaves and 2ⁿ−1 internal nodes. Each leaf soft-routes
-between the constant `1` and the variable `x`. Each internal node computes `eml(left, right)`.
-Gate logits control whether each child input is used or bypassed to `1`.
+between the constant `1` and the variable `x`. Each internal node computes `eml(left, right)`,
+and its gate 3-way-routes each child input between `1`, `x`, and the child's own output — so
+`x` can flow straight into any gate, not just through leaves.
 
-Training (Adam + tau-annealing) pushes the soft weights toward hard 0/1 values,
-recovering an exact symbolic expression. When the generating law is elementary,
-the snapped weights yield machine-epsilon RMSE.
+Training (Adam + tau-annealing) pushes the soft weights toward a single hard choice per gate,
+recovering an exact symbolic expression. When the generating law is elementary, the snapped
+weights yield machine-epsilon RMSE. The final expression is then simplified by a recursive
+AST rewriter that applies EML identities (e.g. `eml(1, eml(eml(1, x), 1)) → ln(x)`).
 
 ### Current recovery rates
 
-| Target | Depth | Rate | RMSE |
-|--------|-------|------|------|
-| `exp(x)` | 1 | 100% | 4.6e-16 |
-| `e` (constant) | 1 | 100% | 0 |
-| `ln(x)` | 3 | 100% | 7.3e-17 |
+| Target | Depth | RMSE |
+|--------|-------|------|
+| `exp(x)` | 1 | 4.6e-16 |
+| `e` (constant) | 1 | 0 |
+| `ln(x)` | 3 | 7.3e-17 |
+| `exp(x) - ln(x)` | 1 | 3.2e-16 |
 
 ## Files
 

@@ -4,8 +4,9 @@ Feed it (x, y) pairs. It finds the formula.
 
 Architecture: a full binary tree where every internal node computes
 eml(left, right) = exp(left) - ln(right). Leaves soft-route between
-the constant 1 and the variable x. Training snaps the routing weights
-to hard 0/1, recovering an exact symbolic expression.
+the constant 1 and the variable x. Each internal node's gate soft-routes
+each child input between [1, x, child-output]. Training snaps the
+routing weights to hard choices, recovering an exact symbolic expression.
 
 Based on Odrzywolek (2026), "All elementary functions from a single
 operator," Section 4.3 — adapted from the bivariate PyTorch v16 trainer
@@ -22,6 +23,7 @@ DTYPE = torch.complex128
 REAL = torch.float64
 _CLAMP = 1e300
 _BYPASS = 1.0 - torch.finfo(torch.float64).eps
+_CHILD_EPS = torch.finfo(torch.float64).eps
 
 
 # ─── EML operator ──────────────────────────────────────────────
@@ -37,7 +39,8 @@ class EMLTree1D(nn.Module):
     """Univariate EML tree of given depth.
 
     Leaves: soft choice between 1 and x  (2 logits per leaf)
-    Gates:  soft bypass to 1 for each child input  (2 logits per node)
+    Gates:  each child input soft-routes over {1, x, child}
+            (3 logits per side, 2 sides per node)
     """
 
     def __init__(self, depth: int, init_scale: float = 1.0):
@@ -51,9 +54,10 @@ class EMLTree1D(nn.Module):
         leaf_init[:, 0] += 2.0  # bias toward constant 1
         self.leaf_logits = nn.Parameter(leaf_init)
 
-        # Gate logits: (n_internal, 2) — [left_bypass, right_bypass]
-        # High value = bypass child, use 1 instead
-        gate_init = torch.randn(self.n_internal, 2, dtype=REAL) * init_scale + 4.0
+        # Gate logits: (n_internal, 2, 3) — 3-way softmax over [1, x, child]
+        # Bias toward constant 1 (safe default that triggers leaf usage below).
+        gate_init = torch.randn(self.n_internal, 2, 3, dtype=REAL) * init_scale
+        gate_init[..., 0] += 4.0
         self.gate_logits = nn.Parameter(gate_init)
 
     def forward(self, x, tau: float = 1.0):
@@ -66,6 +70,12 @@ class EMLTree1D(nn.Module):
         candidates = torch.stack([ones, x], dim=1)  # (batch, 2)
         level = candidates @ w.T  # (batch, n_leaves)
 
+        # Gate probabilities: 3-way softmax per side
+        gate_probs = torch.softmax(self.gate_logits / tau, dim=-1)  # (n_internal, 2, 3)
+
+        x_r = x.real.unsqueeze(1)  # (batch, 1)
+        x_i = x.imag.unsqueeze(1)
+
         # Bottom-up: pair children, apply gates, compute eml
         node_idx = 0
         while level.shape[1] > 1:
@@ -73,23 +83,52 @@ class EMLTree1D(nn.Module):
             left = level[:, 0::2]   # (batch, n_pairs)
             right = level[:, 1::2]
 
-            s = torch.sigmoid(
-                self.gate_logits[node_idx:node_idx + n_pairs] / tau
-            )  # (n_pairs, 2)
-            sl = s[:, 0].unsqueeze(0)  # (1, n_pairs)
-            sr = s[:, 1].unsqueeze(0)
+            pg = gate_probs[node_idx:node_idx + n_pairs]  # (n_pairs, 2, 3)
+            # [p_const, p_x, p_child] for each side
+            p0l = pg[:, 0, 0].unsqueeze(0)  # (1, n_pairs)
+            p1l = pg[:, 0, 1].unsqueeze(0)
+            p2l = pg[:, 0, 2].unsqueeze(0)
+            p0r = pg[:, 1, 0].unsqueeze(0)
+            p1r = pg[:, 1, 1].unsqueeze(0)
+            p2r = pg[:, 1, 2].unsqueeze(0)
 
-            # Blend: s=1 → use 1, s=0 → use child
-            # Careful inf handling: blend real/imag separately
-            bl = sl > _BYPASS
-            br = sr > _BYPASS
-            oml = 1.0 - sl
-            omr = 1.0 - sr
+            # When child contribution is negligible, zero it out to avoid
+            # 0*inf = nan (since `left`/`right` may be clamped-inf).
+            mask_l = p2l > _CHILD_EPS
+            mask_r = p2r > _CHILD_EPS
+            safe_left_r = torch.where(mask_l, left.real, torch.zeros_like(left.real))
+            safe_left_i = torch.where(mask_l, left.imag, torch.zeros_like(left.imag))
+            safe_right_r = torch.where(mask_r, right.real, torch.zeros_like(right.real))
+            safe_right_i = torch.where(mask_r, right.imag, torch.zeros_like(right.imag))
+            p2l_safe = torch.where(mask_l, p2l, torch.zeros_like(p2l))
+            p2r_safe = torch.where(mask_r, p2r, torch.zeros_like(p2r))
 
-            lr = torch.where(bl, 1.0, sl + oml * left.real)
-            li = torch.where(bl, 0.0, oml * left.imag)
-            rr = torch.where(br, 1.0, sr + omr * right.real)
-            ri = torch.where(br, 0.0, omr * right.imag)
+            # Soft blend over [1, x, child]
+            lr = p0l + p1l * x_r + p2l_safe * safe_left_r
+            li = p1l * x_i + p2l_safe * safe_left_i
+            rr = p0r + p1r * x_r + p2r_safe * safe_right_r
+            ri = p1r * x_i + p2r_safe * safe_right_i
+
+            # Clean bypass when a single choice has essentially all the mass.
+            # This matters at low tau for exact snapping.
+            bl_to_1 = p0l > _BYPASS
+            bl_to_x = p1l > _BYPASS
+            br_to_1 = p0r > _BYPASS
+            br_to_x = p1r > _BYPASS
+
+            ones_lr = torch.ones_like(lr)
+            zeros_li = torch.zeros_like(li)
+            x_r_b = x_r.expand_as(lr)
+            x_i_b = x_i.expand_as(li)
+
+            lr = torch.where(bl_to_1, ones_lr, lr)
+            li = torch.where(bl_to_1, zeros_li, li)
+            lr = torch.where(bl_to_x, x_r_b, lr)
+            li = torch.where(bl_to_x, x_i_b, li)
+            rr = torch.where(br_to_1, ones_lr, rr)
+            ri = torch.where(br_to_1, zeros_li, ri)
+            rr = torch.where(br_to_x, x_r_b, rr)
+            ri = torch.where(br_to_x, x_i_b, ri)
 
             left_in = torch.complex(lr, li)
             right_in = torch.complex(rr, ri)
@@ -106,44 +145,45 @@ class EMLTree1D(nn.Module):
             node_idx += n_pairs
 
         leaf_probs = torch.softmax(self.leaf_logits / tau, dim=1)
-        gate_probs = torch.sigmoid(self.gate_logits / tau)
         return level.squeeze(1), leaf_probs, gate_probs
 
     def snap(self):
-        """Hard-snap all weights to 0/1. Returns a detached copy."""
+        """Hard-snap all weights to single-choice. Returns a detached copy."""
         import copy
         tree = copy.deepcopy(self)
         with torch.no_grad():
             k = 50.0
+
+            # Leaves: argmax over 2 options
             lc = torch.argmax(tree.leaf_logits, dim=1)
             new_leaf = torch.full_like(tree.leaf_logits, -k)
             new_leaf[torch.arange(tree.n_leaves), lc] = k
             tree.leaf_logits.copy_(new_leaf)
 
-            gc = (tree.gate_logits >= 0).to(tree.gate_logits.dtype)
-            tree.gate_logits.copy_(
-                torch.where(gc > 0.5,
-                            torch.full_like(tree.gate_logits, k),
-                            torch.full_like(tree.gate_logits, -k))
-            )
+            # Gates: argmax over 3 options, per side
+            gc = torch.argmax(tree.gate_logits, dim=-1)  # (n_internal, 2)
+            new_gate = torch.full_like(tree.gate_logits, -k)
+            idx = torch.arange(tree.n_internal)
+            for side in range(2):
+                new_gate[idx, side, gc[:, side]] = k
+            tree.gate_logits.copy_(new_gate)
         return tree
 
     def to_expr(self) -> str:
         """Extract symbolic expression from snapped tree."""
         leaf_choices = torch.argmax(self.leaf_logits, dim=1).tolist()
-        gate_choices = (self.gate_logits >= 0).tolist()
+        gate_choices = torch.argmax(self.gate_logits, dim=-1).tolist()  # (n_internal, 2)
 
-        labels = {0: "1", 1: "x"}
-        # Build leaf expressions
-        exprs = [labels[c] for c in leaf_choices]
+        leaf_labels = {0: "1", 1: "x"}
+        exprs = [leaf_labels[c] for c in leaf_choices]
 
         node_idx = 0
         while len(exprs) > 1:
             new_exprs = []
             for i in range(0, len(exprs), 2):
-                left_bypass, right_bypass = gate_choices[node_idx]
-                left = "1" if left_bypass else exprs[i]
-                right = "1" if right_bypass else exprs[i + 1]
+                lc, rc = gate_choices[node_idx]
+                left = _resolve_gate(lc, exprs[i])
+                right = _resolve_gate(rc, exprs[i + 1])
                 new_exprs.append(f"eml({left}, {right})")
                 node_idx += 1
             exprs = new_exprs
@@ -155,41 +195,147 @@ class EMLTree1D(nn.Module):
         n = 0
         with torch.no_grad():
             lp = torch.softmax(self.leaf_logits, dim=1)
-            if (lp.max(dim=1).values < 1.0 - threshold).any():
-                n += int((lp.max(dim=1).values < 1.0 - threshold).sum())
-            gp = torch.sigmoid(self.gate_logits)
-            flat = gp.flatten()
-            n += int(((flat > threshold) & (flat < 1.0 - threshold)).sum())
+            n += int((lp.max(dim=1).values < 1.0 - threshold).sum())
+            gp = torch.softmax(self.gate_logits, dim=-1)
+            max_gp = gp.max(dim=-1).values  # (n_internal, 2)
+            n += int((max_gp < 1.0 - threshold).sum())
         return n
 
 
+def _resolve_gate(choice: int, child_expr: str) -> str:
+    """Map a 3-way gate choice to the input expression."""
+    if choice == 0:
+        return "1"
+    if choice == 1:
+        return "x"
+    return child_expr
+
+
 # ─── Expression simplification ─────────────────────────────────
+#
+# Recursive tree-walking simplifier. Parses an eml(...) string into
+# an AST, rewrites bottom-up with known identities, and pretty-prints.
+#
+# AST node forms:
+#   ('atom', s)       — leaf symbol ('1', 'x', '0', 'e', ...)
+#   ('eml', l, r)     — unsimplified eml(l, r)
+#   ('exp', a)        — exp(a)
+#   ('ln',  a)        — ln(a)
+#   ('sub', a, b)     — a - b
+#   ('neg', a)        — -a
+
+def _parse_eml(s: str):
+    """Parse a string of eml(..., ...) and atoms into an AST."""
+    s = s.strip()
+    if s.startswith('eml(') and s.endswith(')'):
+        inner = s[4:-1]
+        depth = 0
+        for i, c in enumerate(inner):
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            elif c == ',' and depth == 0:
+                return ('eml', _parse_eml(inner[:i]), _parse_eml(inner[i + 1:]))
+        raise ValueError(f"Malformed eml expression: {s!r}")
+    return ('atom', s)
+
+
+def _simplify_ast(node):
+    """Apply identities bottom-up. Returns simplified AST."""
+    kind = node[0]
+
+    if kind == 'atom':
+        return node
+
+    if kind == 'eml':
+        # eml(a, b) = exp(a) - ln(b)
+        left = _simplify_ast(node[1])
+        right = _simplify_ast(node[2])
+        return _simplify_ast(('sub', ('exp', left), ('ln', right)))
+
+    if kind == 'exp':
+        a = _simplify_ast(node[1])
+        if a == ('atom', '1'):
+            return ('atom', 'e')
+        if a == ('atom', '0'):
+            return ('atom', '1')
+        if a[0] == 'ln':
+            return a[1]
+        return ('exp', a)
+
+    if kind == 'ln':
+        a = _simplify_ast(node[1])
+        if a == ('atom', '1'):
+            return ('atom', '0')
+        if a == ('atom', 'e'):
+            return ('atom', '1')
+        if a[0] == 'exp':
+            return a[1]
+        return ('ln', a)
+
+    if kind == 'sub':
+        a = _simplify_ast(node[1])
+        b = _simplify_ast(node[2])
+        # a - 0 = a
+        if b == ('atom', '0'):
+            return a
+        # 0 - a = -a
+        if a == ('atom', '0'):
+            return _simplify_ast(('neg', b))
+        # a - a = 0
+        if a == b:
+            return ('atom', '0')
+        # a - (a - c) = c
+        if b[0] == 'sub' and b[1] == a:
+            return b[2]
+        # (a - c) - a = -c
+        if a[0] == 'sub' and a[1] == b:
+            return _simplify_ast(('neg', a[2]))
+        # a - (-b) = a + b  (leave as sub(a, neg(b)) → print as a + b)
+        return ('sub', a, b)
+
+    if kind == 'neg':
+        a = _simplify_ast(node[1])
+        if a == ('atom', '0'):
+            return ('atom', '0')
+        if a[0] == 'neg':
+            return a[1]
+        return ('neg', a)
+
+    return node
+
+
+def _ast_to_str(node) -> str:
+    """Pretty-print an AST node back to a string."""
+    kind = node[0]
+    if kind == 'atom':
+        return node[1]
+    if kind == 'exp':
+        return f"exp({_ast_to_str(node[1])})"
+    if kind == 'ln':
+        return f"ln({_ast_to_str(node[1])})"
+    if kind == 'sub':
+        a = _ast_to_str(node[1])
+        b = node[2]
+        if b[0] == 'neg':
+            return f"({a} + {_ast_to_str(b[1])})"
+        return f"({a} - {_ast_to_str(b)})"
+    if kind == 'neg':
+        return f"(-{_ast_to_str(node[1])})"
+    if kind == 'eml':
+        return f"eml({_ast_to_str(node[1])}, {_ast_to_str(node[2])})"
+    return str(node)
+
 
 def _simplify(expr: str) -> str:
     """Apply known EML identities to make expressions readable."""
-    import re
-    for _ in range(30):
-        prev = expr
-        # Atomic: eml(x, 1) = exp(x), eml(1, 1) = e
-        expr = re.sub(r'eml\(([^,()]+), 1\)', r'exp(\1)', expr)
-        expr = expr.replace("exp(1)", "e")
-
-        # ln(x) = eml(1, exp(eml(1, x)))
-        expr = re.sub(r'eml\(1, exp\(eml\(1, ([^()]+)\)\)\)', r'ln(\1)', expr)
-
-        # eml(ln(a), exp(b)) = a - b
-        expr = re.sub(r'eml\(ln\(([^()]+)\), exp\(([^()]+)\)\)', r'(\1 - \2)', expr)
-
-        # exp(ln(a)) = a (for simple a)
-        expr = re.sub(r'exp\(ln\(([^()]+)\)\)', r'\1', expr)
-
-        # Clean up
-        expr = expr.replace("(x - 0)", "x")
-        expr = expr.replace("(0 - x)", "(-x)")
-
-        if expr == prev:
-            break
-    return expr
+    try:
+        ast = _parse_eml(expr)
+        simplified = _simplify_ast(ast)
+        return _ast_to_str(simplified)
+    except Exception:
+        return expr
 
 
 # ─── Training ──────────────────────────────────────────────────
@@ -310,7 +456,8 @@ def discover(
 
     for depth in range(1, max_depth + 1):
         n_leaves = 2 ** depth
-        n_params = n_leaves * 2 + (n_leaves - 1) * 2
+        n_internal = n_leaves - 1
+        n_params = n_leaves * 2 + n_internal * 2 * 3
         # Scale effort by depth: shallow = fast, deep = more budget
         s_iters = 300 + depth * 400
         h_iters = 100 + depth * 150
