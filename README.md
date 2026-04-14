@@ -1,86 +1,54 @@
-# eml-executor
+# eml-sr
 
-A compiled transformer executor whose only compute instruction is `eml(x, y) = exp(x) − ln(y)`. Every memory access is a parabolic attention dot product. Built in Mojo.
+**EML Symbolic Regression** — discover elementary formulas from data using a single operator.
 
-## Background
+Based on [Odrzywolek (2026)](https://arxiv.org/abs/2603.21852), "All elementary functions from a single operator":
+the operator `eml(x, y) = exp(x) - ln(y)`, together with the constant `1`, generates all standard
+elementary functions. This makes `S → 1 | x | eml(S, S)` a complete, regular search space for
+symbolic regression.
 
-In digital electronics, a single gate (NAND) builds any Boolean circuit. [Odrzywolek (2026)](https://arxiv.org/abs/2603.21852) showed that a single binary operator does the same for continuous mathematics: `eml(x, y) = exp(x) − ln(y)`, paired with the constant 1, generates every function on a scientific calculator — arithmetic, transcendentals, trig, constants including π, e, and i.
+## Quick start
 
-Separately, [llm-as-computer](https://github.com/oaustegard/llm-as-computer) demonstrated that a transformer's attention mechanism can serve as a general-purpose computer: parabolic key encoding gives exact memory addressing via dot products, and programs compile into weight matrices.
+```python
+import numpy as np
+from eml_sr import discover
 
-This project combines both ideas: a machine where **attention handles memory** and **EML handles computation**.
+x = np.linspace(0.5, 5.0, 50)
+y = np.log(x)  # secret formula
 
-## Architecture
-
-**ISA:** 3 opcodes — `PUSH`, `EML`, `HALT`
-
-**Memory:** Parabolic attention with 2D keys. Write at address `a`: key = `(2a, −a²)`. Read for address `a`: query = `(a, 1)`, score via dot product, argmax selects entry. Last-writer-wins for overwrites.
-
-**Compute:** One operation — `eml(x, y) = exp(x) − ln(y)` over ℂ (principal branch).
-
-**Programs** are RPN (postfix) sequences. From the paper:
-
-| Expression | RPN Program | Steps |
-|---|---|---|
-| `e` | `1 1 EML` | 3 |
-| `exp(x)` | `x 1 EML` | 3 |
-| `ln(x)` | `1 1 x EML 1 EML EML` | 7 |
-| `0` | `1 1 1 EML 1 EML EML` | 7 |
-| `exp(iπ) = −1` | `iπ 1 EML` | 3 |
-
-## Verified Results
-
-All tests pass against known values:
-
-- `e = eml(1, 1)` — error: 7.7e-13
-- `exp(2) = eml(2, 1)` — exact
-- `ln(5)` via 3 chained EMLs — error: 7.5e-11
-- `ln(0.5)` — error: 2.3e-12
-- `0 = ln(1)` — error: 2.0e-12
-- Euler's formula `eml(iπ, 1) = −1` — error: 1.2e-16
-
-## Performance
-
-Mojo 0.26.2, Ubuntu 24 (CPU):
-
-| Benchmark | Time | Throughput |
-|---|---|---|
-| `exp(x)` (3-step program) | ~1100 ns | — |
-| `ln(x)` (8-step program, with attention) | ~1700 ns | ~4.7M steps/sec |
-| Raw 3×EML chain (no attention) | ~150 ns | ~6.7M chains/sec |
-
-For reference, [llm-as-computer](https://github.com/oaustegard/llm-as-computer)'s Mojo executor does 67–126M steps/sec — but those are integer operations, not transcendental function evaluations.
-
-## Building
-
-```bash
-# JIT (always works)
-mojo eml_executor.mojo
-
-# Native binary (requires -Xlinker -lm, see modular/modular#5925)
-mojo build eml_executor.mojo -o eml_executor -Xlinker -lm
-./eml_executor
+result = discover(x, y, max_depth=4, n_tries=8)
+print(result["expr"])  # → ln(x)
 ```
 
-**Note:** `mojo build` does not automatically link libm when `std.math` functions are used. The `-Xlinker -lm` flag is required. This is a [known issue](https://github.com/modular/modular/issues/5925). `mojo run` (JIT mode) is unaffected.
+## How it works
 
-## Design Insight
+A full binary tree of depth *n* has 2ⁿ leaves and 2ⁿ−1 internal nodes. Each leaf soft-routes
+between the constant `1` and the variable `x`. Each internal node computes `eml(left, right)`.
+Gate logits control whether each child input is used or bypassed to `1`.
 
-The two parent projects solve the same problem from opposite ends:
+Training (Adam + tau-annealing) pushes the soft weights toward hard 0/1 values,
+recovering an exact symbolic expression. When the generating law is elementary,
+the snapped weights yield machine-epsilon RMSE.
 
-- **llm-as-computer**: discrete operations → compiled into continuous (attention + linear algebra)
-- **EML paper**: continuous operations → unified into one primitive
+### Current recovery rates
 
-This executor is the intersection. The program structure lives in attention (the discrete part). The computation lives in EML (the continuous part). One element does the thinking, one element does the remembering.
+| Target | Depth | Rate | RMSE |
+|--------|-------|------|------|
+| `exp(x)` | 1 | 100% | 4.6e-16 |
+| `e` (constant) | 1 | 100% | 0 |
+| `ln(x)` | 3 | 100% | 7.3e-17 |
 
-## Related
+## Files
 
-- [Interactive EML Calculator](https://oaustegard.github.io/fun-and-games/eml-calc.html) — type any expression, watch it decompose into an EML tree
-- [Two Buttons and a Constant](https://muninn.austegard.com/blog/two-buttons-and-a-constant.html) — technical write-up
-- [Two Buttons — for the Back Row](https://muninn.austegard.com/blog/two-buttons-back-row.html) — plain-language explainer
-- [Odrzywolek (2026)](https://arxiv.org/abs/2603.21852) — the EML paper
-- [llm-as-computer](https://github.com/oaustegard/llm-as-computer) — the parabolic attention executor
+| File | Description |
+|------|-------------|
+| `eml_sr.py` | Symbolic regression engine (the product) |
+| `legacy/eml_executor.mojo` | Original parabolic-attention stack machine (archived) |
+| `legacy/test_eml.mojo` | 109-test bootstrap chain verification (archived) |
 
-## License
+## References
 
-MIT
+- Paper: [arXiv:2603.21852](https://arxiv.org/abs/2603.21852)
+- Blog: [Two buttons and a constant](https://muninn.austegard.com/blog/two-buttons-and-a-constant.html)
+- Blog: [Two buttons, back row](https://muninn.austegard.com/blog/two-buttons-back-row.html)
+- Demo: [EML Calculator](https://austegard.com/fun-and-games/eml-calc.html)
