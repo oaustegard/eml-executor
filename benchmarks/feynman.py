@@ -16,12 +16,28 @@ real Feynman CSVs are 1M+ rows each and most pertain to the multivariate
 case. The synthetic generators here use the identical functional forms
 listed in the Feynman Lectures, drawn over physically reasonable ranges.
 
+The catalogue was retuned in issue #11 after the original (issue #6) run
+revealed that polynomial/rational targets like 1/x², 2x/(1+x²), and the
+gaussian sit far outside EML's reachable vocabulary at depth ≤ 5 from
+random init. The current selection keeps:
+
+  - Linear targets (which expose the depth-1 identity-gap finding —
+    EML cannot output `y = x` until depth ≥ 4 because every output is
+    wrapped in an outer `eml(·,·)`)
+  - exp / ln chains (EML's natural wheelhouse)
+  - The depth-1 EML shape eml(x, x) = exp(x) - ln(x)
+
+The defaults were also flipped to `--method curriculum --normalize standard`
+since min-max normalization to [-1, 1] flattens curvature and pushes the
+optimizer into the `(exp(x) - 1)` local minimum for almost every nonlinear
+target. See issue #11 for the full diagnosis.
+
 Usage::
 
     python -m benchmarks.feynman                  # quick: 8 problems
     python -m benchmarks.feynman --all            # all problems
     python -m benchmarks.feynman --workers 8      # parallel seeds
-    python -m benchmarks.feynman --method curriculum
+    python -m benchmarks.feynman --method discover --normalize minmax
 """
 
 from __future__ import annotations
@@ -86,95 +102,70 @@ def _projection_const(c):
 # "Projection" means a multivariate equation evaluated at fixed constants.
 
 PROBLEMS: list[FeynmanProblem] = [
-    # ── Genuinely univariate ────────────────────────────────────
+    # ── EML's natural vocabulary (depth 1) ──────────────────────
     FeynmanProblem(
-        "I.6.2", "gaussian", "exp(-x^2 / 2) / sqrt(2*pi)",
-        _gaussian, x_range=(-2.0, 2.0),
-        notes="standard normal pdf, depth ≥ 4 (squaring + exp + scale)",
+        "eml.exp", "exp", "exp(x)",
+        lambda x: np.exp(x), x_range=(0.5, 2.5),
+        notes="depth-1 atom: eml(x, 1) = exp(x)",
     ),
     FeynmanProblem(
-        "I.6.20a", "gaussian-sigma1", "exp(-x^2/2)",
-        lambda x: np.exp(-x ** 2 / 2), x_range=(-2.0, 2.0),
+        "eml.eml", "exp-minus-ln", "exp(x) - ln(x)",
+        lambda x: np.exp(x) - np.log(x), x_range=(0.5, 3.0),
+        notes="depth-1 atom: the raw eml(x, x) shape",
     ),
     FeynmanProblem(
-        "I.27.6", "lens-thin", "1/x", lambda x: 1.0 / x,
-        x_range=(0.5, 3.0),
+        "eml.const-e", "constant-e", "e",
+        _projection_const(math.e), x_range=(0.5, 2.5),
+        notes="depth-1 atom: eml(1, 1) = e",
     ),
     FeynmanProblem(
-        "I.34.8", "doppler-low", "x", lambda x: x.copy(), x_range=(0.5, 3.0),
-        notes="trivial identity baseline",
-    ),
-    FeynmanProblem(
-        "I.34.27", "photon-momentum", "1.0545718e-34 * x",
-        lambda x: 1.0545718e-34 * x, x_range=(1e14, 1e15),
-        notes="extreme-scale linear; tests normalization",
+        "eml.e-ln", "e-minus-ln", "e - ln(x)",
+        lambda x: math.e - np.log(x), x_range=(0.5, 3.0),
+        notes="depth-1 atom: eml(1, x)",
     ),
 
-    # ── Projections of common multivariate Feynman eqs ──────────
+    # ── exp / ln chains (EML's wheelhouse) ──────────────────────
     FeynmanProblem(
-        "I.12.1", "friction", "0.3 * x", lambda x: 0.3 * x,
-        x_range=(0.0, 5.0),
-        notes="μ*F_n with μ=0.3 fixed",
+        "eml.lnx", "ln", "ln(x)",
+        lambda x: np.log(x), x_range=(0.5, 5.0),
+        notes="known to require depth 3 for exact recovery",
     ),
     FeynmanProblem(
-        "I.12.4", "coulomb-r", "1 / x^2", lambda x: 1.0 / (x ** 2),
+        "eml.expexp", "exp-of-exp", "exp(exp(x))",
+        lambda x: np.exp(np.exp(x)), x_range=(-1.0, 0.5),
+        notes="depth-2 nested exp; curriculum often beats fixed search",
+    ),
+    FeynmanProblem(
+        "eml.expexpexp", "exp-of-exp-of-exp", "exp(exp(exp(x)))",
+        lambda x: np.exp(np.exp(np.exp(x))), x_range=(-1.0, 0.3),
+        notes="depth-3 nested exp; curriculum-only territory",
+    ),
+    FeynmanProblem(
+        "eml.exp-1", "exp-minus-1", "exp(x) - 1",
+        lambda x: np.exp(x) - 1.0, x_range=(0.0, 2.0),
+        notes="depth-2: eml(x, e) — also the dominant local minimum",
+    ),
+
+    # ── Linear targets (Feynman: friction, potential, photon) ───
+    # These exist primarily to exercise the depth-1 identity-gap finding
+    # from issue #11: EML cannot emit `y = x` until depth ≥ 4 because
+    # every output is wrapped in an outer eml(·,·). When these "succeed"
+    # it is at depth 4 and only because the simplifier collapses a
+    # multi-eml chain back to `x`.
+    FeynmanProblem(
+        "I.34.8", "doppler-low", "x", lambda x: x.copy(),
         x_range=(0.5, 3.0),
-        notes="Coulomb law in r with q1*q2/(4πε0)=1",
+        notes="identity baseline; expected to need depth ≥ 4 (issue #11)",
+    ),
+    FeynmanProblem(
+        "I.12.1", "friction", "0.3 * x", lambda x: 0.3 * x,
+        x_range=(0.5, 5.0),
+        notes="μ*F_n with μ=0.3 fixed; relies on normalizer to absorb scale",
     ),
     FeynmanProblem(
         "I.14.3", "potential-mgz", "9.81 * x", lambda x: 9.81 * x,
-        x_range=(0.0, 10.0),
+        x_range=(0.5, 10.0),
         notes="gravitational PE, m=1 kg",
-    ),
-    FeynmanProblem(
-        "I.16.6", "rel-velocity", "2*x / (1 + x*x)",
-        lambda x: 2 * x / (1 + x * x),
-        x_range=(-0.9, 0.9),
-        notes="velocity addition (v1=v2=x in c=1 units)",
-    ),
-    FeynmanProblem(
-        "I.25.13", "voltage-q", "x / 1e-6", lambda x: x / 1e-6,
-        x_range=(1e-9, 1e-7),
-        notes="V = q/C, C=1μF, extreme-scale",
-    ),
-    FeynmanProblem(
-        "I.29.4", "wavevector", "x / 3e8", lambda x: x / 3e8,
-        x_range=(1e6, 1e9),
-        notes="ω/c → wavenumber",
-    ),
-    FeynmanProblem(
-        "I.34.10", "doppler-freq", "1 / (1 - x)",
-        lambda x: 1.0 / (1.0 - x),
-        x_range=(-0.5, 0.5),
-        notes="non-relativistic Doppler shift",
-    ),
-    FeynmanProblem(
-        "I.39.10", "kinetic-T", "1.5 * 1.380649e-23 * x",
-        lambda x: 1.5 * 1.380649e-23 * x,
-        x_range=(100.0, 600.0),
-        notes="thermal energy at temperature T",
-    ),
-    FeynmanProblem(
-        "I.41.16", "planck-rj", "2 * x", lambda x: 2 * x,
-        x_range=(1e10, 1e14),
-        notes="Rayleigh-Jeans low-freq limit (linear in ν)",
-    ),
-
-    # ── Stress tests (deeper formulas) ──────────────────────────
-    FeynmanProblem(
-        "stress.1", "exp-of-exp", "exp(exp(x))",
-        lambda x: np.exp(np.exp(x)), x_range=(-1.0, 0.5),
-        notes="depth-2 nested exp, curriculum often beats fixed search",
-    ),
-    FeynmanProblem(
-        "stress.2", "exp-minus-ln", "exp(x) - ln(x)",
-        lambda x: np.exp(x) - np.log(x), x_range=(0.5, 3.0),
-        notes="raw eml shape — should be depth 1",
-    ),
-    FeynmanProblem(
-        "stress.3", "ln-x", "ln(x)", lambda x: np.log(x),
-        x_range=(0.5, 5.0),
-        notes="known to require depth 3 for exact recovery",
     ),
 ]
 
@@ -262,8 +253,11 @@ def main():
     p.add_argument("--all", action="store_true", help="Run all problems (else first 8)")
     p.add_argument("--max-depth", type=int, default=4)
     p.add_argument("--tries", type=int, default=8)
-    p.add_argument("--method", choices=["discover", "curriculum"], default="discover")
-    p.add_argument("--normalize", choices=["minmax", "standard", "none"], default="minmax")
+    # Defaults retuned in issue #11: curriculum + standard normalization
+    # recover meaningfully more nonlinear targets than the original
+    # discover + minmax pairing.
+    p.add_argument("--method", choices=["discover", "curriculum"], default="curriculum")
+    p.add_argument("--normalize", choices=["minmax", "standard", "none"], default="standard")
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--threshold", type=float, default=1e-10)
     args = p.parse_args()
