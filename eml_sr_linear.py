@@ -1,0 +1,493 @@
+"""eml_sr_linear: Option B (paper-faithful) tree for EML symbolic regression.
+
+This is an experimental alternative to `EMLTree1D` in `eml_sr.py`. Both trees
+have identical parameter shapes and the same outer EML algebra, but they
+differ in how a gate combines its three input candidates `{1, x, child}`:
+
+  * **Option A** (current default, `EMLTree1D`): the gate applies a softmax
+    over three logits, producing a *convex combination* of `{1, x, child}`.
+    The achievable input value is constrained to the simplex spanned by
+    those three sources — every coefficient is non-negative and they sum
+    to 1. This is computationally cheap and snaps cleanly via argmax, but
+    it is strictly weaker than the paper's parameterization.
+
+  * **Option B** (this module, `EMLTree1DLinear`): the gate uses an
+    *unconstrained linear combination*
+
+        input = α·1 + β·x + γ·child
+
+    with `α, β, γ ∈ ℝ` learned via gradient descent. This matches Section
+    4.3 equation (6) of Odrzywolek (2026). Three things change as a result:
+
+    1. Constants outside `[0, max(1, x)]` (notably `e`, `π`, fractional
+       slopes like `0.3`) live in the depth-1 vocabulary directly, since
+       a leaf or gate side can learn an arbitrary real constant.
+    2. **Subtraction of children is finally available**: setting `γ = -1`
+       lets a parent invert its child's contribution. This unlocks
+       depth-2 recoveries such as `eml(ln(x), 1) = x` via the construction
+       `gate_l = 1 - eml(0, x) = 1 - (1 - ln(x)) = ln(x)`, which is
+       *impossible* under Option A because softmax forbids negative
+       coefficients.
+    3. The loss landscape is smooth everywhere — there is no temperature
+       schedule, no entropy penalty, and no simplex corners producing
+       discontinuous gradients. This eliminates a large class of bad
+       local minima (including the `(e − ln(0))` snap that Option A's
+       curriculum mode exhibits on `exp(exp(exp(x)))`).
+
+## Why we built it
+
+After issue #6's Feynman benchmark and issue #11's diagnosis, we observed
+that Option A failed on every nonlinear target outside its tightest
+vocabulary — `ln(x)` snapped to `e`, `exp(x) - 1` snapped to `exp(x)`,
+`exp(exp(exp(x)))` produced `(e − ln(0))`, and all linear targets
+(`y = x`, `0.3·x`, `9.81·x`) bottomed out as constants. Issue #4
+explicitly listed Option A as the "minimal" fix and Option B as the
+"paper's approach", and we picked A in commit `9363cb9` because it was
+sufficient for the test case in #4 (`eml(x, x) = exp(x) - ln(x)` at
+depth 1). We never circled back to validate that Option A could handle
+the rest of the paper's bootstrap chain. This module addresses that gap.
+
+## Snap to symbolic expressions
+
+The tree's expressivity gain comes at a cost: snapping real-valued
+coefficients to a clean symbolic form is harder than argmax. The
+prototype here uses a simple recipe:
+
+    if |α| < SNAP_EPS:                    α := 0
+    elif |α - round(α)| < SNAP_EPS:       α := round(α)   # nearest int
+    elif |α - e| < SNAP_EPS:              α := e
+    elif |α + e| < SNAP_EPS:              α := -e
+
+Anything else stays as a learned real and is printed numerically. This
+catches the integer/`e` cases that arise from EML identities; richer
+constant recognition (`π`, `1/e`, `ln(2)`, etc.) is a follow-up.
+
+The expression simplifier in `eml_sr.py` only handles the Option-A
+vocabulary `{1, x, 0, e}`. We do not extend it here — instead we emit
+expressions in a separate "linear-combination" form that the snap
+function can pretty-print but the simplifier won't recursively reduce.
+That's intentional scope control: the experiment's job is to answer
+"can the architecture fit these targets at all?", not to deliver the
+full symbolic-recovery pipeline. If the answer is yes, simplifier
+extension is a follow-up issue.
+
+## Limitations of this prototype
+
+  * No multi-process worker support (single-threaded only).
+  * No curriculum learning. Random init at fixed depths.
+  * Snap-to-symbolic is best-effort — non-canonical expressions may
+    print as numeric coefficients.
+  * Only tested on the issue #11 failing targets; broader regression
+    coverage lives in `tests/test_eml_sr.py` and pertains to Option A.
+
+## Reference
+
+  Odrzywolek, A. (2026). "All elementary functions from a single operator."
+  arXiv:2603.21852. Section 4.3, equation (6).
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+from typing import Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from eml_sr import DTYPE, REAL, _CLAMP, eml_op  # noqa: F401  (re-exported)
+
+
+# ─── Constants ─────────────────────────────────────────────────
+
+# Snap tolerance for recognizing integer / `e` / 0 coefficients.
+SNAP_EPS = 0.05
+
+# Famous constants the snap step recognizes.
+_NAMED_CONSTANTS: list[tuple[float, str]] = [
+    (0.0, "0"),
+    (1.0, "1"),
+    (-1.0, "-1"),
+    (2.0, "2"),
+    (-2.0, "-2"),
+    (math.e, "e"),
+    (-math.e, "-e"),
+]
+
+
+# ─── Tree ──────────────────────────────────────────────────────
+
+class EMLTree1DLinear(nn.Module):
+    """Option B EML tree with unconstrained linear gate combinations.
+
+    Same shape contract as `EMLTree1D` but with paper-faithful
+    parameterization:
+
+      Leaves: input = α + β·x   (2 reals per leaf)
+      Gates:  input = α + β·x + γ·child  (3 reals per side, 2 sides per node)
+
+    Identical parameter tensor *shapes* to `EMLTree1D`. They are *not*
+    interchangeable — the values are coefficients here, not pre-softmax
+    logits.
+    """
+
+    def __init__(self, depth: int, init_scale: float = 0.1):
+        super().__init__()
+        self.depth = depth
+        self.n_leaves = 2 ** depth
+        self.n_internal = self.n_leaves - 1
+
+        # Leaf coefficients: (n_leaves, 2) — [α (constant), β (x)]
+        # Initialize close to the depth-1 atom `α=1, β=0` (constant 1) so
+        # the tree starts as a stable constant-1 fit and the optimizer
+        # discovers structure from there.
+        leaf_init = torch.randn(self.n_leaves, 2, dtype=REAL) * init_scale
+        leaf_init[:, 0] += 1.0  # bias α toward 1
+        self.leaf_logits = nn.Parameter(leaf_init)
+
+        # Gate coefficients: (n_internal, 2, 3) — [α (constant), β (x), γ (child)]
+        # Bias γ toward 1.0 so the child contribution flows up by default;
+        # this matches Option A's behavior of "child" being the most
+        # informative source after random init.
+        gate_init = torch.randn(self.n_internal, 2, 3, dtype=REAL) * init_scale
+        gate_init[..., 2] += 1.0  # bias γ toward 1
+        self.gate_logits = nn.Parameter(gate_init)
+
+    def forward(self, x, tau: float = 1.0):  # tau accepted for API parity, unused
+        x = x.to(DTYPE)
+        batch = x.shape[0]
+        ones = torch.ones(batch, dtype=DTYPE)
+
+        # Leaf values: α + β·x (no softmax, no temperature)
+        a = self.leaf_logits[:, 0].to(DTYPE)  # (n_leaves,)
+        b = self.leaf_logits[:, 1].to(DTYPE)  # (n_leaves,)
+        # broadcast: (batch, n_leaves)
+        level = a.unsqueeze(0) * ones.unsqueeze(1) + b.unsqueeze(0) * x.unsqueeze(1)
+
+        # Bottom-up: pair children, apply gate linear combos, compute eml
+        node_idx = 0
+        x_b = x.unsqueeze(1)  # (batch, 1)
+        while level.shape[1] > 1:
+            n_pairs = level.shape[1] // 2
+            left = level[:, 0::2]   # (batch, n_pairs), complex
+            right = level[:, 1::2]
+
+            g = self.gate_logits[node_idx:node_idx + n_pairs]  # (n_pairs, 2, 3) real
+            g_c = g.to(DTYPE)
+            # α, β, γ for left and right sides
+            a_l = g_c[:, 0, 0].unsqueeze(0)  # (1, n_pairs)
+            b_l = g_c[:, 0, 1].unsqueeze(0)
+            c_l = g_c[:, 0, 2].unsqueeze(0)
+            a_r = g_c[:, 1, 0].unsqueeze(0)
+            b_r = g_c[:, 1, 1].unsqueeze(0)
+            c_r = g_c[:, 1, 2].unsqueeze(0)
+
+            # Free linear combinations — no clamping of coefficients.
+            left_in = a_l + b_l * x_b + c_l * left
+            right_in = a_r + b_r * x_b + c_r * right
+
+            level = eml_op(left_in, right_in)
+
+            # Same numerical clamp as Option A — exp/ln overflow is
+            # independent of the parameterization.
+            level = torch.complex(
+                torch.nan_to_num(level.real, nan=0.0,
+                                 posinf=_CLAMP, neginf=-_CLAMP).clamp(-_CLAMP, _CLAMP),
+                torch.nan_to_num(level.imag, nan=0.0,
+                                 posinf=_CLAMP, neginf=-_CLAMP).clamp(-_CLAMP, _CLAMP),
+            )
+            node_idx += n_pairs
+
+        return level.squeeze(1), None, None  # API-compatible 3-tuple
+
+    def snap(self) -> "EMLTree1DLinear":
+        """Snap each coefficient to the nearest recognized constant.
+
+        Modifies a deep-copied tree in place; returns it. Coefficients
+        that don't match any named constant are left as-is and printed
+        numerically by `to_expr()`.
+        """
+        tree = copy.deepcopy(self)
+        with torch.no_grad():
+            for tensor in (tree.leaf_logits, tree.gate_logits):
+                flat = tensor.view(-1)
+                for i in range(flat.numel()):
+                    v = float(flat[i].item())
+                    snapped = _snap_scalar(v)
+                    if snapped is not None:
+                        flat[i] = snapped
+        return tree
+
+    def to_expr(self) -> str:
+        """Pretty-print the tree as a linear-combination eml expression.
+
+        This does *not* run through the recursive simplifier in
+        `eml_sr.py`, since that simplifier only knows about Option A's
+        atomic vocabulary. The printed form is therefore pre-simplification:
+        readers can verify structure but the surface syntax is verbose.
+        """
+        leaf_a = self.leaf_logits[:, 0].tolist()
+        leaf_b = self.leaf_logits[:, 1].tolist()
+        gate = self.gate_logits.tolist()
+
+        # Pretty-print each leaf as α + β·x.
+        exprs = [_lin_expr(a, b, "x") for a, b in zip(leaf_a, leaf_b)]
+
+        node_idx = 0
+        while len(exprs) > 1:
+            new_exprs = []
+            for i in range(0, len(exprs), 2):
+                left_child, right_child = exprs[i], exprs[i + 1]
+                gl = gate[node_idx]  # [[αl, βl, γl], [αr, βr, γr]]
+                left_in = _lin_expr3(gl[0][0], gl[0][1], gl[0][2],
+                                     "x", left_child)
+                right_in = _lin_expr3(gl[1][0], gl[1][1], gl[1][2],
+                                      "x", right_child)
+                new_exprs.append(f"eml({left_in}, {right_in})")
+                node_idx += 1
+            exprs = new_exprs
+        return exprs[0]
+
+    def n_params(self) -> int:
+        return self.leaf_logits.numel() + self.gate_logits.numel()
+
+
+# ─── Snap & pretty-print helpers ───────────────────────────────
+
+def _snap_scalar(v: float) -> Optional[float]:
+    """Return the snapped value if it matches a named constant within
+    SNAP_EPS, else None to indicate "leave it as a learned real"."""
+    # Named constants first (covers e, integers in [-2, 2]).
+    for c, _ in _NAMED_CONSTANTS:
+        if abs(v - c) < SNAP_EPS:
+            return c
+    # Nearest integer for larger magnitudes.
+    if abs(v - round(v)) < SNAP_EPS:
+        return float(round(v))
+    return None
+
+
+def _fmt_coef(v: float) -> str:
+    """Pretty-print a coefficient: recognize named constants, else
+    print as a 3-significant-figure float."""
+    for c, name in _NAMED_CONSTANTS:
+        if abs(v - c) < SNAP_EPS:
+            return name
+    if abs(v - round(v)) < SNAP_EPS:
+        return str(int(round(v)))
+    return f"{v:.3g}"
+
+
+def _lin_expr(a: float, b: float, var: str) -> str:
+    """Pretty-print α + β·var with sane elision of zeros and ones."""
+    parts = []
+    a_str = _fmt_coef(a) if abs(a) >= SNAP_EPS else None
+    if a_str is not None and a_str != "0":
+        parts.append(a_str)
+    if abs(b) >= SNAP_EPS:
+        if abs(b - 1.0) < SNAP_EPS:
+            parts.append(var)
+        elif abs(b + 1.0) < SNAP_EPS:
+            parts.append(f"-{var}")
+        else:
+            parts.append(f"{_fmt_coef(b)}*{var}")
+    if not parts:
+        return "0"
+    return " + ".join(parts).replace("+ -", "- ")
+
+
+def _lin_expr3(a: float, b: float, c: float, var: str, child: str) -> str:
+    """Pretty-print α + β·var + γ·child."""
+    parts = []
+    if abs(a) >= SNAP_EPS:
+        parts.append(_fmt_coef(a))
+    if abs(b) >= SNAP_EPS:
+        if abs(b - 1.0) < SNAP_EPS:
+            parts.append(var)
+        elif abs(b + 1.0) < SNAP_EPS:
+            parts.append(f"-{var}")
+        else:
+            parts.append(f"{_fmt_coef(b)}*{var}")
+    if abs(c) >= SNAP_EPS:
+        if abs(c - 1.0) < SNAP_EPS:
+            parts.append(child)
+        elif abs(c + 1.0) < SNAP_EPS:
+            parts.append(f"-({child})")
+        else:
+            parts.append(f"{_fmt_coef(c)}*({child})")
+    if not parts:
+        return "0"
+    return " + ".join(parts).replace("+ -", "- ")
+
+
+# ─── Training ──────────────────────────────────────────────────
+
+def _discreteness_penalty(tensor: torch.Tensor) -> torch.Tensor:
+    """Penalty pushing each coefficient toward the nearest named constant.
+
+    For each value v, returns min over `c ∈ {0, ±1, ±2, ±e}` of `(v - c)²`,
+    summed over all elements. Differentiable (min-of-squares is smooth
+    almost everywhere; the kink at the bisector between two constants
+    is on a measure-zero set and Adam's momentum smooths it out).
+
+    This is the Option-B counterpart to Option A's entropy penalty:
+    instead of pushing softmax probabilities toward one-hot, it pushes
+    free coefficients toward an integer / `e` lattice that we know the
+    snap step recognizes.
+    """
+    constants = torch.tensor(
+        [c for c, _ in _NAMED_CONSTANTS], dtype=tensor.dtype
+    )  # (n_const,)
+    flat = tensor.view(-1, 1)  # (n, 1)
+    diffs = (flat - constants.unsqueeze(0)) ** 2  # (n, n_const)
+    nearest = diffs.min(dim=1).values  # (n,)
+    return nearest.sum()
+
+
+def _train_one_linear(
+    x_data: torch.Tensor,
+    targets: torch.Tensor,
+    depth: int,
+    seed: int,
+    search_iters: int = 2000,
+    snap_iters: int = 1500,
+    lr: float = 0.01,
+    lam_disc_max: float = 0.5,
+    verbose: bool = False,
+) -> dict:
+    """Train one Option-B tree from a single random seed.
+
+    Two phases (analogous to Option A's tau anneal but additive
+    rather than temperature-based):
+
+      1. Search (it < search_iters): MSE only. Free coefficients
+         explore the full real-valued parameter space.
+      2. Snap (it >= search_iters): MSE + λ * discreteness_penalty,
+         where λ ramps quadratically from 0 to `lam_disc_max`. The
+         penalty pulls each coefficient toward the nearest member of
+         {0, ±1, ±2, ±e}, which the snap step recognizes.
+
+    There is no temperature schedule and no entropy penalty — both are
+    softmax-specific. There is also no L1 penalty; sparsity emerges
+    naturally from the discreteness penalty pulling toward 0 when no
+    nonzero constant fits the local landscape.
+    """
+    torch.manual_seed(seed)
+    tree = EMLTree1DLinear(depth)
+    opt = torch.optim.Adam(tree.parameters(), lr=lr)
+
+    best_loss = float("inf")
+    best_state = None
+    nan_restarts = 0
+    total = search_iters + snap_iters
+
+    for it in range(1, total + 1):
+        if nan_restarts > 20:
+            break
+
+        opt.zero_grad()
+        pred, _, _ = tree(x_data)
+        mse = torch.mean((pred - targets).abs() ** 2).real
+
+        if it >= search_iters:
+            t = (it - search_iters) / max(1, snap_iters)
+            lam = lam_disc_max * (t ** 2)
+            disc = (_discreteness_penalty(tree.leaf_logits)
+                    + _discreteness_penalty(tree.gate_logits))
+            loss = mse + lam * disc
+        else:
+            loss = mse
+
+        if not torch.isfinite(loss):
+            nan_restarts += 1
+            if best_state is not None:
+                tree.load_state_dict(best_state)
+                opt = torch.optim.Adam(tree.parameters(), lr=lr)
+            continue
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(tree.parameters(), 1.0)
+        opt.step()
+
+        val = float(mse.item())
+        if math.isfinite(val) and val < best_loss:
+            best_loss = val
+            best_state = {k: v.clone() for k, v in tree.state_dict().items()}
+
+        if verbose and it % 500 == 0:
+            print(f"  it={it:5d} mse={val:.3e} best={best_loss:.3e}")
+
+    if best_state is not None:
+        tree.load_state_dict(best_state)
+
+    snapped = tree.snap()
+    with torch.no_grad():
+        pred_snap, _, _ = snapped(x_data)
+        snap_mse = torch.mean((pred_snap - targets).abs() ** 2).real.item()
+
+    return {
+        "tree": tree,
+        "snapped": snapped,
+        "best_mse": best_loss,
+        "snap_mse": snap_mse,
+        "snap_rmse": math.sqrt(max(snap_mse, 0)),
+        "expr": snapped.to_expr(),
+        "nan_restarts": nan_restarts,
+    }
+
+
+def discover_linear(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_depth: int = 4,
+    n_tries: int = 8,
+    verbose: bool = True,
+    success_threshold: float = 1e-10,
+) -> Optional[dict]:
+    """Option-B counterpart of `eml_sr.discover()`.
+
+    Tries depths 1 through `max_depth`, each with `n_tries` independent
+    seeds. Returns the simplest (shallowest) formula that fits within
+    `success_threshold`. API mirrors `discover()` for drop-in use in
+    benchmarks.
+    """
+    x_t = torch.tensor(x, dtype=REAL)
+    y_t = torch.tensor(y, dtype=DTYPE) if y.dtype.kind == "c" \
+        else torch.tensor(y, dtype=DTYPE)
+
+    best_overall = None
+    for depth in range(1, max_depth + 1):
+        if verbose:
+            print(f"\n─── depth {depth} (linear / Option B) ───")
+        best_at_depth = None
+        for seed in range(n_tries):
+            result = _train_one_linear(x_t, y_t, depth, seed)
+            if verbose and (seed < 2 or result["snap_rmse"] < 1e-5):
+                print(f"  seed {seed:2d}: snap_rmse={result['snap_rmse']:.3e} "
+                      f"expr={result['expr'][:60]}")
+            if best_at_depth is None or result["snap_mse"] < best_at_depth["snap_mse"]:
+                best_at_depth = result
+            if result["snap_mse"] < success_threshold:
+                break
+
+        if best_at_depth and best_at_depth["snap_mse"] < success_threshold:
+            return {
+                "expr": best_at_depth["expr"],
+                "depth": depth,
+                "snap_rmse": best_at_depth["snap_rmse"],
+                "snapped_tree": best_at_depth["snapped"],
+                "method": "linear",
+            }
+        if best_overall is None or (best_at_depth
+                                    and best_at_depth["snap_mse"] < best_overall["snap_mse"]):
+            best_overall = best_at_depth
+
+    return {
+        "expr": best_overall["expr"],
+        "depth": best_overall["snapped"].depth,
+        "snap_rmse": best_overall["snap_rmse"],
+        "snapped_tree": best_overall["snapped"],
+        "exact": False,
+        "method": "linear",
+    }
