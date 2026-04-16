@@ -28,7 +28,7 @@ from eml_sr_linear import (
     discover_linear,
     iterative_snap,
 )
-from eml_sr_hybrid import discover_hybrid
+from eml_sr_hybrid import discover_hybrid, warm_start_a_from_b
 
 
 # ───────────────────────── helpers ──────────────────────────
@@ -317,4 +317,72 @@ class TestDiscoverHybrid:
         assert "expr" in r
         assert "method" in r
         assert "snap_rmse" in r
-        assert r["method"] in ("option_a", "option_b")
+        assert r["method"] in ("option_a", "option_b", "warm_start_a")
+
+
+# ═══════════════════════ 6. warm_start_a_from_b tests ═══════════════
+
+class TestWarmStartAFromB:
+    """Test warm-starting Option A from Option B's structure (issue #12)."""
+
+    def test_returns_option_a_tree(self):
+        """Output should be an EMLTree1D with correct depth."""
+        from eml_sr import EMLTree1D
+        b = EMLTree1DLinear(2)
+        a = warm_start_a_from_b(b)
+        assert isinstance(a, EMLTree1D)
+        assert a.depth == 2
+        assert a.n_leaves == 4
+        assert a.n_internal == 3
+
+    def test_preserves_depth(self):
+        for d in [1, 2, 3]:
+            b = EMLTree1DLinear(d)
+            a = warm_start_a_from_b(b)
+            assert a.depth == d
+
+    def test_leaf_logits_biased(self):
+        """Leaf logits should be biased toward the dominant B coefficient."""
+        b = EMLTree1DLinear(1)
+        with torch.no_grad():
+            # Set leaf 0 to favor x (β > α), leaf 1 to favor 1 (α > β)
+            b.leaf_logits.copy_(torch.tensor(
+                [[0.1, 5.0], [3.0, 0.2]], dtype=REAL))
+        a = warm_start_a_from_b(b, bias=4.0)
+        # Leaf 0: x dominant → logit[1] should be positive, logit[0] negative
+        assert a.leaf_logits[0, 1].item() > a.leaf_logits[0, 0].item()
+        # Leaf 1: 1 dominant → logit[0] should be positive, logit[1] negative
+        assert a.leaf_logits[1, 0].item() > a.leaf_logits[1, 1].item()
+
+    def test_gate_logits_biased(self):
+        """Gate logits should be biased toward the dominant B coefficient."""
+        b = EMLTree1DLinear(1)
+        with torch.no_grad():
+            # Gate: left side child-dominant (γ=5), right side x-dominant (β=3)
+            b.gate_logits.copy_(torch.tensor(
+                [[[0.1, 0.2, 5.0], [0.1, 3.0, 0.2]]], dtype=REAL))
+        a = warm_start_a_from_b(b, bias=4.0)
+        # Left side: child (idx 2) dominant
+        assert a.gate_logits[0, 0, 2].item() > a.gate_logits[0, 0, 0].item()
+        assert a.gate_logits[0, 0, 2].item() > a.gate_logits[0, 0, 1].item()
+        # Right side: x (idx 1) dominant
+        assert a.gate_logits[0, 1, 1].item() > a.gate_logits[0, 1, 0].item()
+        assert a.gate_logits[0, 1, 1].item() > a.gate_logits[0, 1, 2].item()
+
+    def test_forward_runs(self):
+        """Warm-started A tree should produce valid forward output."""
+        b = EMLTree1DLinear(2)
+        a = warm_start_a_from_b(b)
+        x = _as_real(np.linspace(0.5, 3.0, 20))
+        out, lp, gp = a(x)
+        assert out.shape == (20,)
+        assert torch.isfinite(out.real).all()
+
+    def test_does_not_modify_b(self):
+        """warm_start_a_from_b should not mutate the input B tree."""
+        b = EMLTree1DLinear(1)
+        leaf_before = b.leaf_logits.clone()
+        gate_before = b.gate_logits.clone()
+        _ = warm_start_a_from_b(b)
+        torch.testing.assert_close(b.leaf_logits, leaf_before)
+        torch.testing.assert_close(b.gate_logits, gate_before)

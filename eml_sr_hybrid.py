@@ -33,8 +33,61 @@ from typing import Optional
 import numpy as np
 import torch
 
-from eml_sr import DTYPE, REAL, discover
-from eml_sr_linear import discover_linear, iterative_snap, _train_one_linear
+from eml_sr import DTYPE, REAL, EMLTree1D, _train_one, discover
+from eml_sr_linear import (
+    EMLTree1DLinear, discover_linear, iterative_snap, _train_one_linear,
+)
+
+
+def warm_start_a_from_b(
+    b_tree: EMLTree1DLinear,
+    bias: float = 4.0,
+) -> EMLTree1D:
+    """Create an Option A tree with logits biased from Option B's coefficients.
+
+    For each leaf ``(α, β)`` in B, the A leaf logit for ``{1, x}`` is biased
+    toward whichever has the larger absolute coefficient. For each gate side
+    ``(α, β, γ)`` in B, the A gate logit for ``{1, x, child}`` is biased
+    toward the dominant contributor.
+
+    This gives Option A a warm start from B's structural exploration, so
+    A's tau-anneal training can commit to a discrete structure faster and
+    with fewer random seeds (issue #12).
+
+    Args:
+        b_tree: a trained EMLTree1DLinear (not modified)
+        bias: strength of the logit bias (default 4.0; higher = more
+            confident warm start, lower = more exploration room)
+
+    Returns:
+        A new EMLTree1D with biased logits, ready for training.
+    """
+    depth = b_tree.depth
+    a_tree = EMLTree1D(depth, init_scale=0.0)
+
+    with torch.no_grad():
+        # ── Leaves: (n_leaves, 2) ──
+        # B stores [α (constant), β (x)]. Bias A toward whichever is larger.
+        b_leaf = b_tree.leaf_logits.detach()  # (n_leaves, 2)
+        abs_leaf = b_leaf.abs()
+        dominant = torch.argmax(abs_leaf, dim=1)  # 0 → constant, 1 → x
+        new_leaf = torch.full_like(a_tree.leaf_logits, -bias)
+        new_leaf[torch.arange(a_tree.n_leaves), dominant] = bias
+        a_tree.leaf_logits.copy_(new_leaf)
+
+        # ── Gates: (n_internal, 2, 3) ──
+        # B stores [α (constant), β (x), γ (child)] per side.
+        # Bias A's 3-way softmax logit toward the dominant contributor.
+        b_gate = b_tree.gate_logits.detach()  # (n_internal, 2, 3)
+        abs_gate = b_gate.abs()
+        dominant_gate = torch.argmax(abs_gate, dim=-1)  # (n_internal, 2)
+        new_gate = torch.full_like(a_tree.gate_logits, -bias)
+        idx = torch.arange(a_tree.n_internal)
+        for side in range(2):
+            new_gate[idx, side, dominant_gate[:, side]] = bias
+        a_tree.gate_logits.copy_(new_gate)
+
+    return a_tree
 
 
 def discover_hybrid(
@@ -95,15 +148,77 @@ def discover_hybrid(
     if verbose:
         print(f"\n  Option A best: rmse={a_rmse:.2e} → {a_expr}")
         print(f"  Above threshold {fallback_threshold:.0e}, "
-              f"falling back to Option B.")
+              f"trying warm-start from Option B.")
+
+    x_t = torch.tensor(x, dtype=REAL)
+    y_t = torch.tensor(y, dtype=DTYPE)
+
+    # ── Stage 1.5: Warm-start A from B (issue #12) ────────────
+    # Train a quick Option B to discover structure, then bias
+    # Option A's logits from B's dominant coefficients. This gives
+    # A a better starting point without changing its architecture.
+    if verbose:
+        print("\n═══ Stage 1.5: Warm-start Option A from Option B ═══")
+
+    best_warm = None
+    for depth in range(1, max_depth_b + 1):
+        # Quick B exploration: short budget, no snap penalty.
+        for seed in range(n_tries_b):
+            b_result = _train_one_linear(
+                x_t, y_t, depth=depth, seed=seed,
+                search_iters=1500, snap_iters=0, lam_disc_max=0.0)
+
+            # Convert B's structure to A's logits and train A.
+            a_init = warm_start_a_from_b(b_result["tree"])
+            a_ws = _train_one(x_t, y_t, depth=depth, seed=seed,
+                              init_tree=a_init, verbose=False)
+
+            if verbose and a_ws["snap_rmse"] < 1e-3:
+                print(f"  d={depth} s={seed}: "
+                      f"rmse={a_ws['snap_rmse']:.2e} "
+                      f"→ {a_ws['expr'][:60]}")
+
+            if best_warm is None or a_ws["snap_mse"] < best_warm["snap_mse"]:
+                best_warm = a_ws
+                best_warm["depth"] = depth
+
+            if a_ws["snap_mse"] < fallback_threshold ** 2:
+                break
+        if best_warm and best_warm["snap_mse"] < fallback_threshold ** 2:
+            break
+
+    ws_rmse = best_warm["snap_rmse"] if best_warm else float("inf")
+    if best_warm is not None and ws_rmse < fallback_threshold:
+        if verbose:
+            print(f"\n  ✓ Warm-start A succeeded: {best_warm['expr']}")
+            print(f"    depth={best_warm['depth']} rmse={ws_rmse:.2e}")
+        return {
+            "expr": best_warm["expr"],
+            "depth": best_warm["depth"],
+            "snap_rmse": ws_rmse,
+            "snapped_tree": best_warm["snapped"],
+            "method": "warm_start_a",
+        }
+
+    if verbose:
+        print(f"\n  Warm-start A best: rmse={ws_rmse:.2e}")
+        print(f"  Falling back to full Option B.")
+
+    # Update a_rmse to include warm-start result for final comparison.
+    if ws_rmse < a_rmse:
+        a_rmse = ws_rmse
+        result_a = {
+            "expr": best_warm["expr"],
+            "depth": best_warm["depth"],
+            "snap_rmse": ws_rmse,
+            "snapped_tree": best_warm["snapped"],
+            "n_uncertain": best_warm.get("n_uncertain", 0),
+        }
 
     # ── Stage 2: Option B (train + iterative snap) ─────────────
     if verbose:
         print("\n═══ Stage 2: Option B (linear coefficients "
               "+ iterative snap) ═══")
-
-    x_t = torch.tensor(x, dtype=REAL)
-    y_t = torch.tensor(y, dtype=DTYPE)
 
     best_b = None
     for depth in range(1, max_depth_b + 1):
@@ -146,12 +261,12 @@ def discover_hybrid(
         print(f"\n  B iterative snap: rmse={b_rmse:.2e}")
         print(f"  expr: {b_expr[:80]}")
 
-    # Pick the better result between A and B.
+    # Pick the better result between A (or warm-start A) and B.
     if a_rmse < b_rmse and result_a is not None:
         if verbose:
             print(f"\n  Option A still wins on snap RMSE "
                   f"({a_rmse:.2e} < {b_rmse:.2e})")
-        result_a["method"] = "option_a"
+        result_a["method"] = result_a.get("method", "option_a")
         return result_a
 
     if verbose:

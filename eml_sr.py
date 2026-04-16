@@ -351,10 +351,16 @@ def _train_one(
     tau_search: float = 1.0,
     tau_hard: float = 0.01,
     verbose: bool = False,
+    init_tree: Optional[nn.Module] = None,
 ) -> dict:
-    """Train one EML tree from a single random seed."""
+    """Train one EML tree from a single random seed.
+
+    If ``init_tree`` is provided, it is used instead of creating a fresh
+    ``EMLTree1D(depth)`` from the random seed. The seed still sets the
+    torch RNG for reproducibility of the training loop itself.
+    """
     torch.manual_seed(seed)
-    tree = EMLTree1D(depth)
+    tree = init_tree if init_tree is not None else EMLTree1D(depth)
     opt = torch.optim.Adam(tree.parameters(), lr=lr)
 
     best_loss = float("inf")
