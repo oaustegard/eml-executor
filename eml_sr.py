@@ -433,15 +433,24 @@ def _train_one(
     tau_hard: float = 0.01,
     verbose: bool = False,
     init_tree: Optional[nn.Module] = None,
+    n_vars: Optional[int] = None,
 ) -> dict:
     """Train one EML tree from a single random seed.
 
+    ``x_data`` is either 1D ``(batch,)`` or 2D ``(batch, n_vars)``. The
+    ``EMLTree1D`` is constructed with the matching ``n_vars`` so leaf/gate
+    logits have the right width. If ``n_vars`` is passed explicitly it
+    overrides shape inference (useful when callers have already committed
+    to a dimensionality).
+
     If ``init_tree`` is provided, it is used instead of creating a fresh
-    ``EMLTree1D(depth)`` from the random seed. The seed still sets the
-    torch RNG for reproducibility of the training loop itself.
+    ``EMLTree1D(depth, n_vars=...)`` from the random seed. The seed still
+    sets the torch RNG for reproducibility of the training loop itself.
     """
+    if n_vars is None:
+        n_vars = x_data.shape[1] if x_data.dim() == 2 else 1
     torch.manual_seed(seed)
-    tree = init_tree if init_tree is not None else EMLTree1D(depth)
+    tree = init_tree if init_tree is not None else EMLTree1D(depth, n_vars=n_vars)
     opt = torch.optim.Adam(tree.parameters(), lr=lr)
 
     best_loss = float("inf")
@@ -511,7 +520,7 @@ def _train_one(
 
 
 def discover(
-    x: np.ndarray,
+    X: np.ndarray,
     y: np.ndarray,
     max_depth: int = 4,
     n_tries: int = 16,
@@ -519,13 +528,15 @@ def discover(
     success_threshold: float = 1e-10,
     n_workers: int = 1,
 ) -> Optional[dict]:
-    """Discover a formula relating x → y.
+    """Discover a formula relating X → y.
 
     Tries depths 2 through max_depth, multiple seeds per depth.
     Returns the simplest (shallowest) formula that fits within threshold.
 
     Args:
-        x: input values (1D numpy array)
+        X: input values. Either 1D ``(n_samples,)`` for the univariate
+            case or 2D ``(n_samples, n_vars)`` for multivariate. 1D input
+            is auto-promoted to ``(n_samples, 1)`` for backward compat.
         y: output values (1D numpy array)
         max_depth: maximum tree depth to try (default 4)
         n_tries: random seeds per depth (default 16)
@@ -537,11 +548,22 @@ def discover(
             to wait for its slowest seed before moving to the next depth.
 
     Returns:
-        dict with keys: expr, depth, snap_rmse, snapped_tree
-        or None if no formula found
+        dict with keys: expr, depth, snap_rmse, snapped_tree, n_uncertain,
+        n_vars — or None if no formula found. ``n_vars`` reports the input
+        dimensionality the tree was trained on.
     """
+    # 2D-input shim: accept (n,) or (n, n_vars). The tree forward handles
+    # both, but `EMLTree1D` must be constructed with matching n_vars so
+    # leaf/gate logits have the right width. (Issue #16.)
+    X = np.asarray(X)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    elif X.ndim != 2:
+        raise ValueError(f"X must be 1D or 2D, got shape {X.shape}")
+    n_vars = X.shape[1]
+
     # Prepare data
-    x_t = torch.tensor(x, dtype=REAL)
+    x_t = torch.tensor(X, dtype=REAL)
     y_t = torch.tensor(y, dtype=DTYPE)
 
     best_overall = None
@@ -570,6 +592,7 @@ def discover(
             search_iters=s_iters,
             hard_iters=h_iters,
             verbose=False,
+            n_vars=n_vars,
         )
         for seed, result in _run_seeds(x_t, y_t, depth, n_tries,
                                        train_kwargs, n_workers):
@@ -601,6 +624,7 @@ def discover(
                 "snap_rmse": best_at_depth["snap_rmse"],
                 "snapped_tree": best_at_depth["snapped"],
                 "n_uncertain": best_at_depth["n_uncertain"],
+                "n_vars": n_vars,
             }
 
         if best_overall is None or (best_at_depth and best_at_depth["snap_mse"] < best_overall["snap_mse"]):
@@ -616,6 +640,7 @@ def discover(
         "snap_rmse": best_overall["snap_rmse"],
         "snapped_tree": best_overall["snapped"],
         "n_uncertain": best_overall["n_uncertain"],
+        "n_vars": n_vars,
         "exact": False,
     }
 
