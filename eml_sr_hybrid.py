@@ -91,7 +91,7 @@ def warm_start_a_from_b(
 
 
 def discover_hybrid(
-    x: np.ndarray,
+    X: np.ndarray,
     y: np.ndarray,
     max_depth: int = 4,
     n_tries_a: int = 8,
@@ -100,11 +100,13 @@ def discover_hybrid(
     fallback_threshold: float = 1e-6,
     verbose: bool = True,
 ) -> Optional[dict]:
-    """Discover a formula relating x → y, using Option A first with
+    """Discover a formula relating X → y, using Option A first with
     Option B as a fallback.
 
     Args:
-        x: input values (1D numpy array)
+        X: input values. Either 1D ``(n_samples,)`` or 2D
+            ``(n_samples, n_vars)``. 1D is auto-promoted for backward
+            compat (issue #16).
         y: output values (1D numpy array)
         max_depth: maximum tree depth for Option A (default 4)
         n_tries_a: random seeds per depth for Option A (default 8)
@@ -120,16 +122,25 @@ def discover_hybrid(
             depth: tree depth used
             snap_rmse: RMSE of the snapped tree
             snapped_tree: callable nn.Module
-            method: 'option_a' or 'option_b'
+            n_vars: input dimensionality the tree was trained on
+            method: 'option_a', 'warm_start_a', or 'option_b'
             fit_rmse: (Option B only) pre-snap RMSE showing the
                       architecture's true fitting power
     """
+    # 2D-input shim (issue #16).
+    X = np.asarray(X)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    elif X.ndim != 2:
+        raise ValueError(f"X must be 1D or 2D, got shape {X.shape}")
+    n_vars = X.shape[1]
+
     # ── Stage 1: Option A ──────────────────────────────────────
     if verbose:
         print("═══ Stage 1: Option A (softmax / clean symbolic) ═══")
 
     result_a = discover(
-        x, y,
+        X, y,
         max_depth=max_depth,
         n_tries=n_tries_a,
         verbose=verbose,
@@ -150,7 +161,7 @@ def discover_hybrid(
         print(f"  Above threshold {fallback_threshold:.0e}, "
               f"trying warm-start from Option B.")
 
-    x_t = torch.tensor(x, dtype=REAL)
+    x_t = torch.tensor(X, dtype=REAL)
     y_t = torch.tensor(y, dtype=DTYPE)
 
     # ── Stage 1.5: Warm-start A from B (issue #12) ────────────
@@ -166,12 +177,14 @@ def discover_hybrid(
         for seed in range(n_tries_b):
             b_result = _train_one_linear(
                 x_t, y_t, depth=depth, seed=seed,
-                search_iters=1500, snap_iters=0, lam_disc_max=0.0)
+                search_iters=1500, snap_iters=0, lam_disc_max=0.0,
+                n_vars=n_vars)
 
             # Convert B's structure to A's logits and train A.
             a_init = warm_start_a_from_b(b_result["tree"])
             a_ws = _train_one(x_t, y_t, depth=depth, seed=seed,
-                              init_tree=a_init, verbose=False)
+                              init_tree=a_init, verbose=False,
+                              n_vars=n_vars)
 
             if verbose and a_ws["snap_rmse"] < 1e-3:
                 print(f"  d={depth} s={seed}: "
@@ -197,6 +210,7 @@ def discover_hybrid(
             "depth": best_warm["depth"],
             "snap_rmse": ws_rmse,
             "snapped_tree": best_warm["snapped"],
+            "n_vars": n_vars,
             "method": "warm_start_a",
         }
 
@@ -213,6 +227,7 @@ def discover_hybrid(
             "snap_rmse": ws_rmse,
             "snapped_tree": best_warm["snapped"],
             "n_uncertain": best_warm.get("n_uncertain", 0),
+            "n_vars": n_vars,
         }
 
     # ── Stage 2: Option B (train + iterative snap) ─────────────
@@ -225,7 +240,7 @@ def discover_hybrid(
         for seed in range(n_tries_b):
             r = _train_one_linear(x_t, y_t, depth=depth, seed=seed,
                                   search_iters=3000, snap_iters=10,
-                                  lam_disc_max=0.0)
+                                  lam_disc_max=0.0, n_vars=n_vars)
             r["depth"] = depth
             if best_b is None or r["best_mse"] < best_b["best_mse"]:
                 best_b = r
@@ -277,6 +292,7 @@ def discover_hybrid(
         "depth": best_b["depth"],
         "snap_rmse": b_rmse,
         "snapped_tree": snapped_tree,
+        "n_vars": n_vars,
         "method": "option_b",
         "fit_rmse": best_b["best_mse"] ** 0.5,
     }

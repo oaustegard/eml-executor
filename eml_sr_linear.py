@@ -486,8 +486,14 @@ def _train_one_linear(
     lr: float = 0.01,
     lam_disc_max: float = 0.5,
     verbose: bool = False,
+    n_vars: Optional[int] = None,
 ) -> dict:
     """Train one Option-B tree from a single random seed.
+
+    ``x_data`` is either 1D ``(batch,)`` or 2D ``(batch, n_vars)``. The
+    ``EMLTree1DLinear`` is constructed with matching ``n_vars`` so leaf
+    and gate coefficient tensors have the right width. If ``n_vars`` is
+    passed explicitly it overrides shape inference.
 
     Two phases (analogous to Option A's tau anneal but additive
     rather than temperature-based):
@@ -504,8 +510,10 @@ def _train_one_linear(
     naturally from the discreteness penalty pulling toward 0 when no
     nonzero constant fits the local landscape.
     """
+    if n_vars is None:
+        n_vars = x_data.shape[1] if x_data.dim() == 2 else 1
     torch.manual_seed(seed)
-    tree = EMLTree1DLinear(depth)
+    tree = EMLTree1DLinear(depth, n_vars=n_vars)
     opt = torch.optim.Adam(tree.parameters(), lr=lr)
 
     best_loss = float("inf")
@@ -763,7 +771,7 @@ def _retrain_free(
 
 
 def discover_linear(
-    x: np.ndarray,
+    X: np.ndarray,
     y: np.ndarray,
     max_depth: int = 4,
     n_tries: int = 8,
@@ -776,8 +784,22 @@ def discover_linear(
     seeds. Returns the simplest (shallowest) formula that fits within
     `success_threshold`. API mirrors `discover()` for drop-in use in
     benchmarks.
+
+    Args:
+        X: input values. Either 1D ``(n_samples,)`` or 2D
+            ``(n_samples, n_vars)``. 1D is auto-promoted for backward
+            compat (issue #16).
+        y: output values (1D numpy array)
     """
-    x_t = torch.tensor(x, dtype=REAL)
+    # 2D-input shim (issue #16).
+    X = np.asarray(X)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    elif X.ndim != 2:
+        raise ValueError(f"X must be 1D or 2D, got shape {X.shape}")
+    n_vars = X.shape[1]
+
+    x_t = torch.tensor(X, dtype=REAL)
     y_t = torch.tensor(y, dtype=DTYPE) if y.dtype.kind == "c" \
         else torch.tensor(y, dtype=DTYPE)
 
@@ -787,7 +809,7 @@ def discover_linear(
             print(f"\n─── depth {depth} (linear / Option B) ───")
         best_at_depth = None
         for seed in range(n_tries):
-            result = _train_one_linear(x_t, y_t, depth, seed)
+            result = _train_one_linear(x_t, y_t, depth, seed, n_vars=n_vars)
             if verbose and (seed < 2 or result["snap_rmse"] < 1e-5):
                 print(f"  seed {seed:2d}: snap_rmse={result['snap_rmse']:.3e} "
                       f"expr={result['expr'][:60]}")
@@ -802,6 +824,7 @@ def discover_linear(
                 "depth": depth,
                 "snap_rmse": best_at_depth["snap_rmse"],
                 "snapped_tree": best_at_depth["snapped"],
+                "n_vars": n_vars,
                 "method": "linear",
             }
         if best_overall is None or (best_at_depth
@@ -813,6 +836,7 @@ def discover_linear(
         "depth": best_overall["snapped"].depth,
         "snap_rmse": best_overall["snap_rmse"],
         "snapped_tree": best_overall["snapped"],
+        "n_vars": n_vars,
         "exact": False,
         "method": "linear",
     }
