@@ -1,0 +1,723 @@
+[
+  {
+    "id": "title.c0",
+    "section": "title",
+    "type": "result",
+    "text": "A single binary operator eml(x,y) = exp(x) - ln(y) together with the constant 1 is sufficient to generate all standard elementary functions, arithmetic operations, and mathematical constants.",
+    "page": 1
+  },
+  {
+    "id": "title.c1",
+    "section": "title",
+    "type": "claim",
+    "text": "No prior primitive analogous to a universal gate for continuous mathematics had been known before this work.",
+    "page": 1
+  },
+  {
+    "id": "title.c2",
+    "section": "title",
+    "type": "method",
+    "text": "The operator eml was discovered through systematic exhaustive search and verified constructively against a scientific-calculator function basis.",
+    "page": 1
+  },
+  {
+    "id": "title.c3",
+    "section": "title",
+    "type": "result",
+    "text": "Every elementary function expression in EML form is a binary tree of identical nodes, yielding the simple grammar S \u2192 1 | eml(S,S).",
+    "page": 1
+  },
+  {
+    "id": "title.c4",
+    "section": "title",
+    "type": "result",
+    "text": "Gradient-based symbolic regression using EML trees as trainable circuits with Adam optimizer can exactly recover closed-form elementary functions from numerical data at tree depths up to 4.",
+    "page": 1
+  },
+  {
+    "id": "title.c5",
+    "section": "title",
+    "type": "caveat",
+    "text": "EML trees can fit arbitrary data, but exact formula recovery is demonstrated only when the generating law is an elementary function.",
+    "page": 1
+  },
+  {
+    "id": "title.c6",
+    "section": "title",
+    "type": "result",
+    "text": "Specific derivations show ex = eml(x,1) and ln(x) = eml(1, eml(eml(1,x), 1)).",
+    "page": 1
+  },
+  {
+    "id": "significance.c0",
+    "section": "significance",
+    "type": "result",
+    "text": "All standard mathematical operations taught in school (fractions, roots, logarithms, trigonometric functions) can be replaced by a single operation eml(x,y).",
+    "page": 3
+  },
+  {
+    "id": "significance.c1",
+    "section": "significance",
+    "type": "result",
+    "text": "A calculator with only two buttons\u2014EML and the digit 1\u2014is computationally equivalent to a full scientific calculator.",
+    "page": 3
+  },
+  {
+    "id": "significance.c2",
+    "section": "significance",
+    "type": "claim",
+    "text": "Trigonometric functions reduce to the complex exponential, illustrating that many standard operations are redundant.",
+    "page": 3
+  },
+  {
+    "id": "significance.c3",
+    "section": "significance",
+    "type": "claim",
+    "text": "Because a single repeatable element suffices to express all operations, mathematical expressions become uniform circuits analogous to electronics built from identical transistors.",
+    "page": 3
+  },
+  {
+    "id": "significance.c4",
+    "section": "significance",
+    "type": "claim",
+    "text": "The universality of eml(x,y) opens new approaches to encoding, evaluating, and discovering formulas in scientific computing.",
+    "page": 3
+  },
+  {
+    "id": "significance.c5",
+    "section": "significance",
+    "type": "claim",
+    "text": "The result is not merely a mathematical curiosity but has practical significance for how mathematical expressions are represented and processed.",
+    "page": 3
+  },
+  {
+    "id": "summary-paragraph.c0",
+    "section": "summary-paragraph",
+    "type": "result",
+    "text": "The operator eml(x,y) = exp(x)ln(y) together with the constant 1 can reconstruct arithmetic, all standard elementary transcendental functions, and constants including integers, fractions, radicals, e, \u03c0, and i.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c1",
+    "section": "summary-paragraph",
+    "type": "result",
+    "text": "A two-button calculator using only 1 and eml suffices to perform everything a full scientific calculator can do.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c2",
+    "section": "summary-paragraph",
+    "type": "claim",
+    "text": "Elementary functions belong to a much simpler generative class than previously recognized.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c3",
+    "section": "summary-paragraph",
+    "type": "result",
+    "text": "Every EML expression is a binary tree of identical nodes described by the context-free grammar S \u2192 1 | eml(S,S), which is isomorphic to full binary trees and Catalan structures.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c4",
+    "section": "summary-paragraph",
+    "type": "result",
+    "text": "Parameterized EML trees can be optimized by standard gradient methods, and trained weights can snap to exact closed-form expressions when the underlying law is elementary.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c5",
+    "section": "summary-paragraph",
+    "type": "claim",
+    "text": "A single trainable EML architecture has the potential to discover any elementary formula from data.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c6",
+    "section": "summary-paragraph",
+    "type": "claim",
+    "text": "Preliminary searches suggest related operators with even stronger properties exist, including a ternary variant requiring no distinguished constant.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c7",
+    "section": "summary-paragraph",
+    "type": "claim",
+    "text": "Classical reductions reduced elementary functions to a few primitives but could not reduce them to a single universal primitive before the EML operator.",
+    "page": 2
+  },
+  {
+    "id": "summary-paragraph.c8",
+    "section": "summary-paragraph",
+    "type": "open-question",
+    "text": "It was previously unclear whether the apparent diversity of elementary functions is intrinsic or whether a smaller generative basis exists.",
+    "page": 2
+  },
+  {
+    "id": "1.c0",
+    "section": "1",
+    "type": "claim",
+    "text": "Single reusable primitives such as NAND, ReLU, and SUBLEQ play disproportionately large roles in mathematics, engineering, and biology.",
+    "page": 4
+  },
+  {
+    "id": "1.c1",
+    "section": "1",
+    "type": "claim",
+    "text": "The existence of a single sufficient operator is conceptually striking even if classical logic can function with a redundant family of connectives.",
+    "page": 4
+  },
+  {
+    "id": "1.c2",
+    "section": "1",
+    "type": "claim",
+    "text": "Elementary functions, arithmetic operations, and standard constants are heavily redundant, especially in the complex domain, but have never previously been treated as candidates for reduction to a single primitive operator.",
+    "page": 4
+  },
+  {
+    "id": "1.c3",
+    "section": "1",
+    "type": "result",
+    "text": "The exp-log pair allows multiplication and addition to be expressed in terms of each other via exp and ln.",
+    "page": 5
+  },
+  {
+    "id": "1.c4",
+    "section": "1",
+    "type": "result",
+    "text": "Euler's formula shows that trigonometric functions can be viewed as another face of exp and ln once the imaginary unit is introduced.",
+    "page": 5
+  },
+  {
+    "id": "1.c5",
+    "section": "1",
+    "type": "definition",
+    "text": "The EML operator eml(x,y) = exp(x) - ln(y) is defined as a single binary operator that can express any standard real elementary function through repeated application together with the constant 1.",
+    "page": 5
+  },
+  {
+    "id": "1.c6",
+    "section": "1",
+    "type": "result",
+    "text": "The constant 1 is required as a terminal symbol to neutralize the logarithmic term via ln(1)=0, and computations must be performed in the complex domain.",
+    "page": 5
+  },
+  {
+    "id": "1.c7",
+    "section": "1",
+    "type": "result",
+    "text": "For a pocket calculator with no external input variables, two buttons suffice for full functionality: the binary EML operator and the terminal symbol 1.",
+    "page": 5
+  },
+  {
+    "id": "1.c8",
+    "section": "1",
+    "type": "result",
+    "text": "No further reduction of operator count below one binary operator and one terminal symbol is possible.",
+    "page": 5
+  },
+  {
+    "id": "1.c9",
+    "section": "1",
+    "type": "claim",
+    "text": "The existence of a binary elementary function that serves as a Sheffer-type operator for all elementary functions is described as somewhat unexpected.",
+    "page": 5
+  },
+  {
+    "id": "4.c0",
+    "section": "4",
+    "type": "claim",
+    "text": "The uniform tree structure of EML expressions suggests several directions for implementation and application.",
+    "page": 10
+  },
+  {
+    "id": "2.c0",
+    "section": "2",
+    "type": "method",
+    "text": "A set of 36 primitives (constants, unary functions, binary operations) serves as the starting list for ablation testing.",
+    "page": 6
+  },
+  {
+    "id": "2.c1",
+    "section": "2",
+    "type": "definition",
+    "text": "An operator set is deemed complete if it can reconstruct all 36 primitives from Table 1 on the real axis.",
+    "page": 6
+  },
+  {
+    "id": "2.c2",
+    "section": "2",
+    "type": "claim",
+    "text": "Nested expressions of RPN depth 5\u20139 are typical witnesses for completeness, and no regular automatic method exists to find them without brute-force or AI assistance.",
+    "page": 6
+  },
+  {
+    "id": "2.c3",
+    "section": "2",
+    "type": "caveat",
+    "text": "Direct symbolic verification of operator completeness is computationally intractable, necessitating a hybrid numeric approach.",
+    "page": 7
+  },
+  {
+    "id": "2.c4",
+    "section": "2",
+    "type": "result",
+    "text": "Kolmogorov-style complexity K of typical reconstructions is at most 7, and the search was conducted up to K = 9.",
+    "page": 7
+  },
+  {
+    "id": "2.c5",
+    "section": "2",
+    "type": "method",
+    "text": "Substituting algebraically independent transcendental constants for variables enables reliable numeric sieving of formula equivalence candidates under the Schanuel conjecture.",
+    "page": 7
+  },
+  {
+    "id": "2.c6",
+    "section": "2",
+    "type": "method",
+    "text": "The iterative bootstrapping procedure transfers successfully reconstructed primitives from the target list to the known-operators list until the target list is empty.",
+    "page": 7
+  },
+  {
+    "id": "2.c7",
+    "section": "2",
+    "type": "result",
+    "text": "Ablation testing yielded progressively smaller calculator configurations (Calc 3, 2, 1, 0) with different required primitives.",
+    "page": 8
+  },
+  {
+    "id": "2.c8",
+    "section": "2",
+    "type": "result",
+    "text": "The function eml(x,y) paired with the constant 1 forms a complete basis for reconstructing all elementary functions.",
+    "page": 8
+  },
+  {
+    "id": "2.c9",
+    "section": "2",
+    "type": "result",
+    "text": "EML is not unique; close variants EDL (requiring constant e) and a third variant using negative infinity as a terminal symbol also exist.",
+    "page": 8
+  },
+  {
+    "id": "2.c10",
+    "section": "2",
+    "type": "result",
+    "text": "A Rust implementation of VerifyBaseSet is three orders of magnitude faster than the Mathematica version, allowing re-checking of EML in seconds.",
+    "page": 8
+  },
+  {
+    "id": "3.c0",
+    "section": "3",
+    "type": "result",
+    "text": "Calc 3 was the first configuration to surpass the Wolfram Language primitive set, using 6 primitives: exp, ln, negation, reciprocal, and addition.",
+    "page": 8
+  },
+  {
+    "id": "3.c1",
+    "section": "3",
+    "type": "result",
+    "text": "Calc 2 achieves the same expressiveness as Calc 3 using only exp, ln, and subtraction, reducing the count to 4 primitives while retaining the ability to generate constants internally.",
+    "page": 8
+  },
+  {
+    "id": "3.c2",
+    "section": "3",
+    "type": "claim",
+    "text": "The non-commutative operator subtraction is crucial because it provides both expression-tree growth and inversion capabilities.",
+    "page": 8
+  },
+  {
+    "id": "3.c3",
+    "section": "3",
+    "type": "result",
+    "text": "Calc 1 uses binary exponentiation and binary logarithm as base operators and works only with e or \u03c0 as terminal constants; no other constant was found to work.",
+    "page": 8
+  },
+  {
+    "id": "3.c4",
+    "section": "3",
+    "type": "result",
+    "text": "Calc 0 absorbs the constant e into the exp function, reducing the system to 3 primitives and suggesting a single binary operator might suffice.",
+    "page": 8
+  },
+  {
+    "id": "3.c5",
+    "section": "3",
+    "type": "claim",
+    "text": "All minimal configurations involve pairs of inverse functions and non-commutative operations, a pattern that guided the discovery of EML.",
+    "page": 8
+  },
+  {
+    "id": "3.c6",
+    "section": "3",
+    "type": "result",
+    "text": "EML, defined as eml(x,y) = exp(x) - ln(y) with constant 1, is a single binary operator sufficient to generate all 36 elementary operations.",
+    "page": 9
+  },
+  {
+    "id": "3.c7",
+    "section": "3",
+    "type": "result",
+    "text": "EML has at least two cousins: EDL defined as exp(x)/ln(y) with constant e, and -EML defined as ln(x) - exp(y) with constant negative infinity.",
+    "page": 9
+  },
+  {
+    "id": "3.c8",
+    "section": "3",
+    "type": "result",
+    "text": "The natural logarithm can be expressed in EML at depth 3 as ln(z) = eml(1, eml(eml(1,z), 1)).",
+    "page": 9
+  },
+  {
+    "id": "3.c9",
+    "section": "3",
+    "type": "result",
+    "text": "EML expressions for elementary operations range from depth 1 (exponential) to depth 8 (multiplication).",
+    "page": 9
+  },
+  {
+    "id": "3.c10",
+    "section": "3",
+    "type": "method",
+    "text": "Verification of the EML completeness is supported by symbolic simplification in Mathematica, numerical cross-checks across four implementations (C, NumPy, PyTorch, mpmath), and a constructive completeness proof sketch.",
+    "page": 9
+  },
+  {
+    "id": "3.c11",
+    "section": "3",
+    "type": "open-question",
+    "text": "A speculated undiscovered binary operator may generate constants from arbitrary input, unlike EML which requires constant 1.",
+    "page": 9
+  },
+  {
+    "id": "3.c12",
+    "section": "3",
+    "type": "open-question",
+    "text": "A speculated undiscovered unary operator may retain properties of neural network activation functions while enabling exact evaluation of elementary functions with standard arithmetic.",
+    "page": 9
+  },
+  {
+    "id": "4.2.c0",
+    "section": "4.2",
+    "type": "result",
+    "text": "Any elementary function expression tree in EML notation is binary, governed by the trivial context-free grammar S \u2192 1 | eml(S,S).",
+    "page": 11
+  },
+  {
+    "id": "4.2.c1",
+    "section": "4.2",
+    "type": "definition",
+    "text": "Input variables are added as additional terminal symbols in the EML grammar (e.g., x in the univariate case).",
+    "page": 11
+  },
+  {
+    "id": "4.2.c2",
+    "section": "4.2",
+    "type": "result",
+    "text": "The identity function can be computed using an EML tree of depth 4, which allows input variables to be moved down the tree.",
+    "page": 12
+  },
+  {
+    "id": "4.2.c3",
+    "section": "4.2",
+    "type": "caveat",
+    "text": "Trigonometric and other elementary functions have EML trees too large to display in print, as shown in Table 4.",
+    "page": 12
+  },
+  {
+    "id": "4.2.c4",
+    "section": "4.2",
+    "type": "claim",
+    "text": "The EML Sheffer operator can serve as a new basic building block for analog computing circuits, analogous to NAND gates, Op-Amps, and transistors.",
+    "page": 12
+  },
+  {
+    "id": "4.2.c5",
+    "section": "4.2",
+    "type": "method",
+    "text": "Using the EML compiler, any elementary function expression can be converted to an analog circuit with binary tree topology.",
+    "page": 12
+  },
+  {
+    "id": "4.2.c6",
+    "section": "4.2",
+    "type": "claim",
+    "text": "EML trees provide a uniform treatment of generic multivariate elementary functions, addressing a known problem in analog computing.",
+    "page": 12
+  },
+  {
+    "id": "4.2.c7",
+    "section": "4.2",
+    "type": "definition",
+    "text": "The EML Sheffer operation is non-commutative, so arrow chirality determines input order: first counterclockwise input after dot is expx, then lny.",
+    "page": 12
+  },
+  {
+    "id": "ai-use.c0",
+    "section": "ai-use",
+    "type": "claim",
+    "text": "The discovery of the EML Sheffer operator and all core research contributions are entirely the author's own work, not AI-generated.",
+    "page": 16
+  },
+  {
+    "id": "ai-use.c1",
+    "section": "ai-use",
+    "type": "method",
+    "text": "Large language models (Claude, Grok, Gemini, ChatGPT) were used only for language editing and coding assistance.",
+    "page": 16
+  },
+  {
+    "id": "4.1.c0",
+    "section": "4.1",
+    "type": "result",
+    "text": "The VerifyBaseSet procedure provides sufficient data to reconstruct any primitive or composite elementary expression in terms of the EML Sheffer stroke operation.",
+    "page": 10
+  },
+  {
+    "id": "4.1.c1",
+    "section": "4.1",
+    "type": "method",
+    "text": "A prototype EML compiler coded in Python converts formulas into pure EML form.",
+    "page": 10
+  },
+  {
+    "id": "4.1.c2",
+    "section": "4.1",
+    "type": "result",
+    "text": "EML expressions can be evaluated symbolically in Mathematica or numerically in any IEEE 754-compliant language.",
+    "page": 10
+  },
+  {
+    "id": "4.1.c3",
+    "section": "4.1",
+    "type": "claim",
+    "text": "Pure EML form can be executed on a single-instruction stack machine resembling a single-button RPN calculator.",
+    "page": 10
+  },
+  {
+    "id": "4.1.c4",
+    "section": "4.1",
+    "type": "claim",
+    "text": "Pure EML form could potentially be implemented efficiently in FPGA or analog circuits.",
+    "page": 10
+  },
+  {
+    "id": "4.1.c5",
+    "section": "4.1",
+    "type": "result",
+    "text": "The RPN encoding of ln x requires K=7 EML instructions: 11xE1EE.",
+    "page": 10
+  },
+  {
+    "id": "4.1.c6",
+    "section": "4.1",
+    "type": "caveat",
+    "text": "EML-compiled expressions work on the real axis except at isolated points such as zero and domain endpoints, and internal computations for trigonometric functions must be performed in the complex domain.",
+    "page": 11
+  },
+  {
+    "id": "4.1.c7",
+    "section": "4.1",
+    "type": "caveat",
+    "text": "The principal branch choice for complex logarithm in EML causes a 2\u03c0i jump on the negative real axis due to the 1/z term, preventing standard use of ln(-1)=i\u03c0.",
+    "page": 11
+  },
+  {
+    "id": "4.1.c8",
+    "section": "4.1",
+    "type": "result",
+    "text": "EML-compiled formulas work correctly in symbolic Mathematica and IEEE 754 floating-point (e.g. math.h in C) because these properly handle ln0=-\u221e and e^{-\u221e}=0.",
+    "page": 11
+  },
+  {
+    "id": "4.1.c9",
+    "section": "4.1",
+    "type": "caveat",
+    "text": "EML expressions do not work out of the box in pure Python/Julia or numerical Mathematica because special floats raise errors or cause overflow, but do work in NumPy and PyTorch.",
+    "page": 11
+  },
+  {
+    "id": "4.1.c10",
+    "section": "4.1",
+    "type": "caveat",
+    "text": "The Lean 4 proof assistant assigns a junk value of 0 to the complex logarithm at zero, causing straightforward formalization of the EML chain to fail.",
+    "page": 11
+  },
+  {
+    "id": "4.1.c11",
+    "section": "4.1",
+    "type": "claim",
+    "text": "The edge-case difficulties encountered in EML are not fundamentally different from those in ordinary floating-point or symbolic computation.",
+    "page": 11
+  },
+  {
+    "id": "data-availability.c0",
+    "section": "data-availability",
+    "type": "method",
+    "text": "All code and scripts used to generate figures, tables, and numerical results are publicly available in the SymbolicRegressionPackage repository and archived on Zenodo.",
+    "page": 16
+  },
+  {
+    "id": "acknowledgments.c0",
+    "section": "acknowledgments",
+    "type": "claim",
+    "text": "Computational resources for this research were partially provided by Google Cloud Research Credits.",
+    "page": 16
+  },
+  {
+    "id": "supplementary.c0",
+    "section": "supplementary",
+    "type": "method",
+    "text": "Extensive three-part supporting information is supplied as a separate SI Appendix PDF document.",
+    "page": 16
+  },
+  {
+    "id": "5.c0",
+    "section": "5",
+    "type": "result",
+    "text": "The EML operator provides a single sufficient primitive from which all real elementary functions can be constructed and evaluated.",
+    "page": 15
+  },
+  {
+    "id": "5.c1",
+    "section": "5",
+    "type": "claim",
+    "text": "EML is not unique; close variants such as EDL and the swapped-argument form eml(y,x) likely exhibit similar universality properties.",
+    "page": 15
+  },
+  {
+    "id": "5.c2",
+    "section": "5",
+    "type": "open-question",
+    "text": "Whether an EML-type binary Sheffer operator can function without pairing with a distinguished constant remains an open question.",
+    "page": 15
+  },
+  {
+    "id": "5.c3",
+    "section": "5",
+    "type": "caveat",
+    "text": "Proving impossibility of a Sheffer operator without a distinguished constant for any given candidate is non-trivial, as illustrated by the example B(x,y)=x-y/2.",
+    "page": 15
+  },
+  {
+    "id": "5.c4",
+    "section": "5",
+    "type": "claim",
+    "text": "A ternary operator T(x,y,z) = e^(x/ln x) * ln z / e^y satisfying T(x,x,x)=1 is identified as a candidate for further analysis.",
+    "page": 16
+  },
+  {
+    "id": "5.c5",
+    "section": "5",
+    "type": "open-question",
+    "text": "Whether a univariate Sheffer operator exists that simultaneously serves as a neural activation function and generates all elementary functions remains open.",
+    "page": 16
+  },
+  {
+    "id": "5.c6",
+    "section": "5",
+    "type": "claim",
+    "text": "EML requires complex arithmetic internally to compute real elementary functions, analogously to how quantum computing uses complex amplitudes to produce real probabilities.",
+    "page": 16
+  },
+  {
+    "id": "5.c7",
+    "section": "5",
+    "type": "claim",
+    "text": "A continuous Sheffer operator working purely in the real domain appears impossible, as no real-domain alternatives were found.",
+    "page": 16
+  },
+  {
+    "id": "5.c8",
+    "section": "5",
+    "type": "result",
+    "text": "Any conventional neural network is a special case of an EML tree architecture because standard activation functions are themselves elementary functions.",
+    "page": 16
+  },
+  {
+    "id": "5.c9",
+    "section": "5",
+    "type": "result",
+    "text": "EML representations can recover closed-form elementary subexpressions by snapping trained weights to exact binary values, providing interpretability unavailable to conventional architectures.",
+    "page": 16
+  },
+  {
+    "id": "4.3.c0",
+    "section": "4.3",
+    "type": "claim",
+    "text": "A single EML operator is sufficient to construct a multiparameter master formula that can represent any elementary function by choosing specific parameter values.",
+    "page": 12
+  },
+  {
+    "id": "4.3.c1",
+    "section": "4.3",
+    "type": "result",
+    "text": "A full binary tree of depth n has 2^n - 1 branches and 2^n leaves, and the largest transformers with trillions of parameters correspond to an equivalent tree depth of 40.",
+    "page": 12
+  },
+  {
+    "id": "4.3.c2",
+    "section": "4.3",
+    "type": "result",
+    "text": "The level-2 master formula has 14 free parameters, and in general the level-n master formula has 5 * 2^n - 6 parameters.",
+    "page": 14
+  },
+  {
+    "id": "4.3.c3",
+    "section": "4.3",
+    "type": "method",
+    "text": "Each input to eml(x,y) in the master formula can be represented as a linear combination alpha_i + beta_i * x + gamma_i * f, which unifies the three possible input cases: constant 1, variable x, or previous eml result f.",
+    "page": 13
+  },
+  {
+    "id": "4.3.c4",
+    "section": "4.3",
+    "type": "claim",
+    "text": "The EML master formula is complete by design, capable of expressing all elementary functions, unlike typical SR approaches that use a potentially incomplete subset of operations.",
+    "page": 14
+  },
+  {
+    "id": "4.3.c5",
+    "section": "4.3",
+    "type": "result",
+    "text": "Using simplex reparameterization with a level-3 master formula and Mathematica's NMinimize, exact recovery of ln(x) was achieved with fitting error at numerical precision, with perfect generalization beyond the training range.",
+    "page": 14
+  },
+  {
+    "id": "4.3.c6",
+    "section": "4.3",
+    "type": "result",
+    "text": "Blind recovery from random initialization succeeds in 100% of runs at depth 2, approximately 25% at depths 3-4, below 1% at depth 5, and not at all at depth 6 in 448 attempts.",
+    "page": 15
+  },
+  {
+    "id": "4.3.c7",
+    "section": "4.3",
+    "type": "result",
+    "text": "When the correct EML tree weights are perturbed by Gaussian noise, optimization converges back to exact values in 100% of runs even at depths 5 and 6, confirming valid basins of attraction exist.",
+    "page": 15
+  },
+  {
+    "id": "4.3.c8",
+    "section": "4.3",
+    "type": "open-question",
+    "text": "Finding correct basins of attraction from random initialization becomes harder with increasing tree depth, suggesting a need for better binary operators with non-exponential asymptotics and no domain issues.",
+    "page": 15
+  },
+  {
+    "id": "4.3.c9",
+    "section": "4.3",
+    "type": "caveat",
+    "text": "Training EML networks in practice requires clamping arguments for exp(x) and careful handling of complex arithmetic to avoid NaN errors and range overflow.",
+    "page": 15
+  },
+  {
+    "id": "4.3.c10",
+    "section": "4.3",
+    "type": "result",
+    "text": "Successful symbolic recovery yields mean squared errors at the level of machine epsilon squared (~10^-32), consistent with exact symbolic recovery.",
+    "page": 15
+  }
+]
