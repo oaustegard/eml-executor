@@ -662,6 +662,12 @@ class GrowingEMLTree(nn.Module):
     split into eml subtrees to grow the tree incrementally, providing a
     warm start for deeper formulas.
 
+    Supports n_vars input variables (default 1 for backward compat).
+
+    Leaves: soft choice over {1, x₁, ..., xₙ}  (n_vars+1 logits per leaf)
+    Gates:  each child input soft-routes over {1, x₁, ..., xₙ, child}
+            (n_vars+2 logits per side, 2 sides per node)
+
     Nodes are stored in a flat list; each entry is a dict with 'type'
     ('leaf' or 'internal'), 'key' (into self._params), and for internal
     nodes 'left'/'right' (indices into self.nodes). When a leaf is split,
@@ -669,11 +675,12 @@ class GrowingEMLTree(nn.Module):
     optimizer state stays consistent across grow steps.
     """
 
-    def __init__(self, init_scale: float = 1.0):
+    def __init__(self, init_scale: float = 1.0, n_vars: int = 1):
         super().__init__()
         self._params = nn.ParameterDict()
         self.nodes: list = []
         self.init_scale = init_scale
+        self.n_vars = n_vars
         self._next_key = 0
         # Build initial: two leaves + one internal root (depth 1)
         l0 = self._new_leaf()
@@ -689,7 +696,8 @@ class GrowingEMLTree(nn.Module):
 
     def _new_leaf(self) -> int:
         key = self._fresh_key("leaf")
-        init = torch.randn(2, dtype=REAL) * self.init_scale
+        # (n_vars+1,) logits: [weight_for_1, weight_for_x1, ..., weight_for_xn]
+        init = torch.randn(self.n_vars + 1, dtype=REAL) * self.init_scale
         init[0] += 2.0  # bias toward constant 1
         self._params[key] = nn.Parameter(init)
         idx = len(self.nodes)
@@ -698,7 +706,9 @@ class GrowingEMLTree(nn.Module):
 
     def _new_internal(self, left: int, right: int) -> int:
         key = self._fresh_key("gate")
-        init = torch.randn(2, 3, dtype=REAL) * self.init_scale
+        # (2, n_vars+2) logits per gate: each side softmaxes over
+        # [1, x1, ..., xn, child].
+        init = torch.randn(2, self.n_vars + 2, dtype=REAL) * self.init_scale
         init[..., 0] += 4.0  # bias toward constant 1
         self._params[key] = nn.Parameter(init)
         idx = len(self.nodes)
@@ -762,7 +772,14 @@ class GrowingEMLTree(nn.Module):
     # --- forward ---
 
     def forward(self, x, tau: float = 1.0):
-        x_c = x.to(DTYPE)
+        # Accept (batch,) for n_vars=1 back-compat or (batch, n_vars).
+        if x.dim() == 1:
+            x = x.unsqueeze(1)
+        if x.shape[1] != self.n_vars:
+            raise ValueError(
+                f"x has {x.shape[1]} columns but tree is n_vars={self.n_vars}"
+            )
+        x_c = x.to(DTYPE)                      # (batch, n_vars), complex
         cache: dict = {}
         val = self._eval(self.root, x_c, tau, cache)
         # Collect active softmaxed probs for entropy regularization / reporting.
@@ -781,42 +798,46 @@ class GrowingEMLTree(nn.Module):
         if idx in cache:
             return cache[idx]
         n = self.nodes[idx]
+        batch = x_c.shape[0]
         if n["type"] == "leaf":
-            logits = self._params[n["key"]]
-            w = torch.softmax(logits / tau, dim=0).to(DTYPE)
-            ones = torch.ones_like(x_c)
-            val = w[0] * ones + w[1] * x_c
+            logits = self._params[n["key"]]                     # (n_vars+1,)
+            w = torch.softmax(logits / tau, dim=0).to(DTYPE)    # (n_vars+1,)
+            ones = torch.ones(batch, dtype=DTYPE)
+            val = w[0] * ones
+            for v in range(self.n_vars):
+                val = val + w[v + 1] * x_c[:, v]
         else:
-            gate = self._params[n["key"]]
-            p = torch.softmax(gate / tau, dim=-1)  # (2, 3), real
+            gate = self._params[n["key"]]                       # (2, n_vars+2)
+            p = torch.softmax(gate / tau, dim=-1)               # (2, n_vars+2), real
+            child_idx = self.n_vars + 1
             left_val = self._eval(n["left"], x_c, tau, cache)
             right_val = self._eval(n["right"], x_c, tau, cache)
 
-            p0l, p1l, p2l = p[0, 0], p[0, 1], p[0, 2]
-            p0r, p1r, p2r = p[1, 0], p[1, 1], p[1, 2]
+            def _blend(side: int, child_val):
+                ps = p[side]                                    # (n_vars+2,)
+                p_child = ps[child_idx]                         # scalar
 
-            # Mask out child contribution when its probability is negligible,
-            # to avoid 0*inf = nan (child values may be clamped-inf).
-            mask_l = p2l > _CHILD_EPS
-            mask_r = p2r > _CHILD_EPS
-            zero_r = torch.zeros_like(left_val.real)
-            zero_i = torch.zeros_like(left_val.imag)
-            left_r = torch.where(mask_l, left_val.real, zero_r)
-            left_i = torch.where(mask_l, left_val.imag, zero_i)
-            right_r = torch.where(mask_r, right_val.real, zero_r)
-            right_i = torch.where(mask_r, right_val.imag, zero_i)
-            p2l_s = torch.where(mask_l, p2l, torch.zeros_like(p2l))
-            p2r_s = torch.where(mask_r, p2r, torch.zeros_like(p2r))
+                # Mask out child contribution when its probability is negligible,
+                # to avoid 0*inf = nan (child values may be clamped-inf).
+                zero_r = torch.zeros_like(child_val.real)
+                zero_i = torch.zeros_like(child_val.imag)
+                mask_c = p_child > _CHILD_EPS
+                child_r = torch.where(mask_c, child_val.real, zero_r)
+                child_i = torch.where(mask_c, child_val.imag, zero_i)
+                p_c_s = torch.where(mask_c, p_child, torch.zeros_like(p_child))
 
-            x_r = x_c.real
-            x_i = x_c.imag
-            lr = p0l + p1l * x_r + p2l_s * left_r
-            li = p1l * x_i + p2l_s * left_i
-            rr = p0r + p1r * x_r + p2r_s * right_r
-            ri = p1r * x_i + p2r_s * right_i
+                # α + Σ βᵢ xᵢ + γ child — computed separately for real/imag
+                # so downstream clamping can scrub NaN per-part cleanly.
+                blend_r = ps[0] + p_c_s * child_r
+                blend_i = p_c_s * child_i
+                for v in range(self.n_vars):
+                    p_v = ps[v + 1]
+                    blend_r = blend_r + p_v * x_c[:, v].real
+                    blend_i = blend_i + p_v * x_c[:, v].imag
+                return torch.complex(blend_r, blend_i)
 
-            l_in = torch.complex(lr, li)
-            r_in = torch.complex(rr, ri)
+            l_in = _blend(0, left_val)
+            r_in = _blend(1, right_val)
             val = eml_op(l_in, r_in)
             val = torch.complex(
                 torch.nan_to_num(val.real, nan=0.0, posinf=_CLAMP, neginf=-_CLAMP)
@@ -829,34 +850,58 @@ class GrowingEMLTree(nn.Module):
 
     # --- growing ---
 
-    def split_leaf(self, leaf_idx: int) -> int:
-        """Replace `leaf_idx` with an eml subtree approximating exp(x)=eml(x, 1).
+    def split_leaf(self, leaf_idx: int, var_idx: int = 0) -> int:
+        """Replace ``leaf_idx`` with an eml subtree approximating
+        ``exp(x_{var_idx+1}) = eml(x_{var_idx+1}, 1)``.
 
-        Returns the new internal node index. The old leaf's parameters are
-        orphaned (unreachable) but remain in the parameter dict so that any
-        live optimizer state referencing them stays valid.
+        Args:
+            leaf_idx: index of the leaf to split.
+            var_idx: which input variable (0..n_vars-1) to route through
+                the new subtree. For n_vars=1 this is always 0, matching
+                the previous behavior. Caller is responsible for picking
+                this — typically the variable with the largest gradient
+                component at the splitting leaf (see
+                ``leaf_gradients()``).
+
+        Returns:
+            The new internal node index. The old leaf's parameters are
+            orphaned (unreachable) but remain in the parameter dict so
+            that any live optimizer state referencing them stays valid.
         """
         assert self.nodes[leaf_idx]["type"] == "leaf", "can only split leaves"
-        # New leaves: left biased toward x, right biased toward constant 1
+        if not (0 <= var_idx < self.n_vars):
+            raise ValueError(
+                f"var_idx={var_idx} out of range for n_vars={self.n_vars}"
+            )
+        # Logit indices: 0 = "1", 1..n_vars = x1..xn, n_vars+1 = "child" (gate only)
+        var_logit_idx = var_idx + 1
+        child_logit_idx = self.n_vars + 1
+
+        # New leaves: left biased toward x_{var_idx+1}, right biased toward "1".
         new_l = self._new_leaf()
         new_r = self._new_leaf()
         with torch.no_grad():
             k = 4.0
-            self._params[self.nodes[new_l]["key"]].copy_(
-                torch.tensor([-k, k], dtype=REAL))  # → "x"
-            self._params[self.nodes[new_r]["key"]].copy_(
-                torch.tensor([k, -k], dtype=REAL))  # → "1"
-        # New internal: gate routes both sides to child, giving eml(x, 1) = exp(x)
+            # Left leaf → x_{var_idx+1}: strong weight on var_logit_idx, weak on rest.
+            left_init = torch.full((self.n_vars + 1,), -k, dtype=REAL)
+            left_init[var_logit_idx] = k
+            self._params[self.nodes[new_l]["key"]].copy_(left_init)
+            # Right leaf → "1": strong weight on index 0.
+            right_init = torch.full((self.n_vars + 1,), -k, dtype=REAL)
+            right_init[0] = k
+            self._params[self.nodes[new_r]["key"]].copy_(right_init)
+        # New internal gate: both sides route to "child", giving
+        # eml(left_leaf, right_leaf) = eml(x_{var_idx+1}, 1) = exp(x_{var_idx+1}).
         new_int = self._new_internal(new_l, new_r)
         with torch.no_grad():
             k = 4.0
-            g = torch.full((2, 3), -k, dtype=REAL)
-            g[:, 2] = k  # "child"
+            g = torch.full((2, self.n_vars + 2), -k, dtype=REAL)
+            g[:, child_logit_idx] = k
             self._params[self.nodes[new_int]["key"]].copy_(g)
         # Rewire parent (or root) to point at new_int instead of leaf_idx.
         # Also bias the parent gate side toward "child" so the new subtree
         # is visible to the parent — otherwise a gate that had hard-snapped
-        # to "1" or "x" would leave the split inert.
+        # to a non-child option would leave the split inert.
         if leaf_idx == self.root:
             self.root = new_int
         else:
@@ -871,10 +916,9 @@ class GrowingEMLTree(nn.Module):
                 side = 1
             with torch.no_grad():
                 pg = self._params[pn["key"]]
-                # Reset the side's logits to bias toward "child" (index 2).
-                pg[side, 0] = -2.0
-                pg[side, 1] = -2.0
-                pg[side, 2] = 2.0
+                # Reset the side's logits to bias toward "child" (last index).
+                pg[side, :] = -2.0
+                pg[side, child_logit_idx] = 2.0
         return new_int
 
     def leaf_gradient_magnitudes(self, x_data, y_target, tau: float) -> dict:
@@ -882,18 +926,40 @@ class GrowingEMLTree(nn.Module):
 
         Used as the split-selection heuristic: the leaf most "wanting" to
         change is the one with the largest gradient magnitude.
+
+        For per-variable gradient components (used to pick *which* variable
+        to route through a split subtree), use ``leaf_gradients()``.
+        """
+        grads = self.leaf_gradients(x_data, y_target, tau)
+        return {i: float(g.norm().item()) for i, g in grads.items()}
+
+    def leaf_gradients(self, x_data, y_target, tau: float) -> dict:
+        """Compute ∂MSE/∂leaf_logits for each active leaf.
+
+        Returns ``{leaf_idx: tensor}`` where each tensor has shape
+        ``(n_vars+1,)`` and entry ``v`` (for v=1..n_vars) is the partial
+        derivative of MSE with respect to the logit that routes the leaf
+        toward ``x_v``. Entry 0 is the partial for the constant ``1``.
+
+        The split heuristic in ``discover_curriculum`` picks the variable
+        with the largest |partial| among entries ``1..n_vars`` to route
+        through the new subtree.
         """
         self.zero_grad()
         pred, _, _ = self(x_data, tau=tau)
         mse = torch.mean((pred - y_target).abs() ** 2).real
         if not torch.isfinite(mse):
+            self.zero_grad()
             return {}
         mse.backward()
         grads = {}
         for i in self.active_leaves():
             key = self.nodes[i]["key"]
             g = self._params[key].grad
-            grads[i] = float(g.norm().item()) if g is not None else 0.0
+            if g is not None:
+                grads[i] = g.detach().clone()
+            else:
+                grads[i] = torch.zeros(self.n_vars + 1, dtype=REAL)
         self.zero_grad()
         return grads
 
@@ -944,13 +1010,16 @@ class GrowingEMLTree(nn.Module):
         n = self.nodes[idx]
         if n["type"] == "leaf":
             c = int(torch.argmax(self._params[n["key"]]).item())
-            return "1" if c == 0 else "x"
+            if c == 0:
+                return "1"
+            return "x" if self.n_vars == 1 else f"x{c}"
         g = self._params[n["key"]]
         lc = int(torch.argmax(g[0]).item())
         rc = int(torch.argmax(g[1]).item())
         left_expr = self._expr_at(n["left"])
         right_expr = self._expr_at(n["right"])
-        return f"eml({_resolve_gate(lc, left_expr)}, {_resolve_gate(rc, right_expr)})"
+        return (f"eml({_resolve_gate(lc, left_expr, self.n_vars)}, "
+                f"{_resolve_gate(rc, right_expr, self.n_vars)})")
 
 
 def _train_growing(
@@ -1031,15 +1100,19 @@ def discover_curriculum(
 
     Starts from a depth-1 tree. Trains to convergence. If the fit is not good
     enough, splits the active leaf whose gradient magnitude is largest — the
-    split replaces it with `eml(x, 1) = exp(x)` — and resumes training. Repeats
-    until `max_depth` is reached or an exact formula is found.
+    split replaces it with ``eml(x_v, 1) = exp(x_v)``, where ``x_v`` is the
+    variable with the largest gradient component at the splitting leaf — and
+    resumes training. Repeats until ``max_depth`` is reached or an exact
+    formula is found.
 
     This provides a warm start for depth-5 / depth-6 formulas that random
     initialization cannot easily find (the paper reports 0% recovery at
     depth 6 from random init).
 
     Args:
-        x: input values (1D numpy array)
+        x: input values. Either 1D ``(n_samples,)`` for the univariate
+            case or 2D ``(n_samples, n_vars)`` for multivariate. 1D input
+            is auto-promoted for backward compat.
         y: output values (1D numpy array, real or complex)
         max_depth: maximum tree depth to grow to (default 6)
         n_tries: independent curriculum runs with different seeds (default 8)
@@ -1048,20 +1121,32 @@ def discover_curriculum(
         success_threshold: MSE threshold for "exact" recovery
 
     Returns:
-        dict with keys: expr, depth, snap_rmse, snapped_tree, n_splits, exact
+        dict with keys: expr, depth, snap_rmse, snapped_tree, n_splits,
+        n_vars, exact
     """
+    x = np.asarray(x)
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+    elif x.ndim != 2:
+        raise ValueError(f"x must be 1D or 2D, got shape {x.shape}")
+    n_vars = x.shape[1]
+
     x_t = torch.tensor(x, dtype=REAL)
     y_t = torch.tensor(y, dtype=DTYPE)
 
     best_overall = None
 
     # Depth-0 pre-check: the curriculum's growing tree starts at depth 1,
-    # but the atoms `y = 1` and `y = x` are reachable one depth shallower
-    # (a single-leaf tree, no gates). Try those two snaps explicitly before
-    # kicking off the (more expensive) growing loop. See issue #11.
+    # but the atoms ``y = 1`` and ``y = x_v`` are reachable one depth shallower
+    # (a single-leaf tree, no gates). Try those n_vars+1 snaps explicitly
+    # before kicking off the (more expensive) growing loop. See issue #11.
     with torch.no_grad():
-        for leaf_choice, label in ((0, "1"), (1, "x")):
-            probe = EMLTree1D(depth=0)
+        n_atoms = n_vars + 1
+        for leaf_choice in range(n_atoms):
+            label = "1" if leaf_choice == 0 else (
+                "x" if n_vars == 1 else f"x{leaf_choice}"
+            )
+            probe = EMLTree1D(depth=0, n_vars=n_vars)
             new_leaf = torch.full_like(probe.leaf_logits, -50.0)
             new_leaf[0, leaf_choice] = 50.0
             probe.leaf_logits.copy_(new_leaf)
@@ -1079,12 +1164,13 @@ def discover_curriculum(
                     "n_uncertain": 0,
                     "n_splits": 0,
                     "seed": 0,
+                    "n_vars": n_vars,
                     "exact": True,
                 }
 
     for seed in range(n_tries):
         torch.manual_seed(seed)
-        tree = GrowingEMLTree()
+        tree = GrowingEMLTree(n_vars=n_vars)
         opt = torch.optim.Adam(tree.parameters(), lr=lr)
 
         if verbose:
@@ -1128,16 +1214,25 @@ def discover_curriculum(
                and grow_step < max_grow_steps):
             grow_step += 1
             # Pick leaf to split: largest gradient magnitude among leaves
-            # whose depth is still below max_depth.
-            grads = tree.leaf_gradient_magnitudes(x_t, y_t, tau=1.0)
+            # whose depth is still below max_depth. Then pick *which variable*
+            # to route through the new subtree: the one with the largest
+            # gradient component at that leaf (issue #18 option a).
+            grads = tree.leaf_gradients(x_t, y_t, tau=1.0)
+            if not grads:
+                break
+            norms = {i: float(g.norm().item()) for i, g in grads.items()}
             splittable = {
-                i: g for i, g in grads.items()
+                i: v for i, v in norms.items()
                 if tree.depth_of_node(i) + 1 <= max_depth
             }
             if not splittable:
                 break
             leaf_to_split = max(splittable, key=splittable.get)
-            tree.split_leaf(leaf_to_split)
+            # Variable selection: argmax |grad| among the n_vars variable
+            # logits (indices 1..n_vars of the leaf's gradient vector).
+            var_grads = grads[leaf_to_split][1:].abs()
+            var_idx = int(torch.argmax(var_grads).item()) if n_vars > 1 else 0
+            tree.split_leaf(leaf_to_split, var_idx=var_idx)
 
             # New params → fresh optimizer state. Old Adam state referenced
             # dead params; re-initializing avoids stale-param issues.
@@ -1156,8 +1251,8 @@ def discover_curriculum(
 
             snapped, snap_mse = _finalize_and_check()
             if verbose:
-                print(f"  split #{grow_step} → depth {d}: "
-                      f"snap_rmse={math.sqrt(max(snap_mse, 0)):.3e} "
+                print(f"  split #{grow_step} (var=x{var_idx+1}) → "
+                      f"depth {d}: snap_rmse={math.sqrt(max(snap_mse, 0)):.3e} "
                       f"expr={snapped.to_expr()[:60]}")
 
         result = {
@@ -1184,6 +1279,7 @@ def discover_curriculum(
                 "n_uncertain": result["n_uncertain"],
                 "n_splits": result["n_splits"],
                 "seed": seed,
+                "n_vars": n_vars,
                 "exact": True,
             }
 
@@ -1203,6 +1299,7 @@ def discover_curriculum(
         "n_uncertain": best_overall["n_uncertain"],
         "n_splits": best_overall["n_splits"],
         "seed": best_overall["seed"],
+        "n_vars": n_vars,
         "exact": False,
     }
 
