@@ -56,6 +56,19 @@ from typing import Iterable, Optional, Union
 
 import numpy as np
 
+# ─── Errors ────────────────────────────────────────────────────────
+
+class GrammarError(ValueError):
+    """Raised when ``strict=True`` rejects an input that isn't derivable
+    from the paper's pure grammar ``S -> 1 | x | eml(S, S)``.
+
+    Subclasses :class:`ValueError` for backward compatibility — existing
+    callers that catch ``ValueError`` still work; new callers can narrow
+    to ``GrammarError`` to distinguish strict-mode grammar violations
+    from parser/lexer errors.
+    """
+
+
 # ─── Tree representation ───────────────────────────────────────────
 
 @dataclass
@@ -354,8 +367,12 @@ def compile(ast: dict, *, strict: bool = False,
 
     Raises
     ------
+    GrammarError
+        In ``strict=True`` mode, when the input contains numeric literals
+        other than ``0`` / ``1`` or named constants other than ``e``.
+        Subclasses :class:`ValueError` for backward compatibility.
     ValueError
-        On unsupported operators (trig) or strict-mode violations.
+        On unsupported operators (trig) or other parser errors.
     """
     allowed_vars = set(variables) if variables is not None else None
 
@@ -365,7 +382,7 @@ def compile(ast: dict, *, strict: bool = False,
         if kind == "num":
             v = node["v"]
             if strict and v not in (0, 1):
-                raise ValueError(
+                raise GrammarError(
                     f"strict mode: numeric literal {v!r} is not derivable from "
                     "{{1, x}}; rewrite it algebraically (e.g. 2 -> 1+1) or use strict=False"
                 )
@@ -378,7 +395,7 @@ def compile(ast: dict, *, strict: bool = False,
                 return _E(_one(), _one(), "e")
             if name in ("pi", "π", "PI", "Pi"):
                 if strict:
-                    raise ValueError(
+                    raise GrammarError(
                         "strict mode: π requires a huge bootstrap tree "
                         "(π = -i·ln(-1)); use strict=False"
                     )
