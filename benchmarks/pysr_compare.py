@@ -215,7 +215,11 @@ def _run_eml_sr(prob: FeynmanProblem, *, method: str, max_depth: int,
         with torch.no_grad():
             pred_n, _, _ = snapped(torch.tensor(X_n, dtype=REAL), tau=0.01)
             pred_np = norm.inverse_y(pred_n.real.detach().numpy())
-            rmse_orig = float(np.sqrt(np.mean((pred_np - y) ** 2)))
+            # A snapped tree can overflow float64 on unrecovered targets
+            # (e.g. 9.81*x forced through an exp chain). The rmse we compute
+            # is correctly inf in that case; the RuntimeWarning is noise.
+            with np.errstate(over="ignore", invalid="ignore"):
+                rmse_orig = float(np.sqrt(np.mean((pred_np - y) ** 2)))
         # Tree size = internal eml nodes + leaves. Matches the compiler's
         # tree_size() convention so the "ref EML size" column is
         # apples-to-apples. `discover` returns an ``EMLTree1D`` (with
