@@ -293,3 +293,35 @@ class TestDiscoverCurriculum2D:
         assert r2["n_vars"] == 1
         assert r1["exact"] is True
         assert r2["exact"] is True
+
+    @pytest.mark.slow
+    def test_recover_ln_depth3(self):
+        """Regression guard for issue #49: discover_curriculum must recover
+        ln(x) exactly.
+
+        ln(x) = eml(1, eml(eml(1, x), 1)) — the root's left child is the
+        bare terminal ``1``. The default split_leaf warm-start seeds new
+        subtrees as eml(x, 1) = exp(x), which puts the variable on the
+        left and is systematically wrong for ln-shaped targets. Seed
+        parity alternation (even→variable, odd→terminal) unblocks the
+        canonical ln tree; the terminal bias seeds eml(1, x) on the
+        left. Paired with best-in-seed snap tracking (splits can degrade
+        the tree between growth steps), this nails ln(x) at
+        machine-epsilon.
+        """
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0.5, 5.0, size=200).astype(np.float64)
+        y = np.log(x)
+        r = discover_curriculum(
+            x.reshape(-1, 1), y,
+            max_depth=4, n_tries=8,
+            success_threshold=1e-6,
+            verbose=False,
+        )
+        assert r is not None
+        assert r["exact"] is True, (
+            f"curriculum did not recover ln(x) exactly: "
+            f"rmse={r['snap_rmse']:.3e} expr={r['expr']!r}"
+        )
+        assert r["snap_rmse"] < 1e-8
+        assert r["expr"] == "ln(x)"
