@@ -214,15 +214,42 @@ leaves are all either `1` or a named variable — paper-faithful.
 Trig (`sin`, `cos`, `tan`) is out of scope per §4.1 — their EML trees are
 enormous. Use `exp`/`ln` with complex arguments.
 
+## Distillation: MLP → EML expressions
+
+`eml_sr_distill.py` implements the KAN-style post-hoc extraction pipeline
+proposed in issue #42. Train a small MLP, sample the per-feature univariate
+partial-dependence curves, run `discover_curriculum` on each, and compose
+the results additively. Surrogate quality is reported as R² against the
+MLP's output; compression is the ratio of MLP parameters to EML tree
+nodes.
+
+```python
+from eml_sr_distill import train_mlp, distill
+
+model = train_mlp(X, y, hidden_sizes=(8,), activation="tanh")
+report = distill(model, X, y, method="curriculum", max_depth=5, n_tries=6)
+print(report.summary())
+```
+
+See `benchmarks/distill_demo.py` for a three-target demo (linear additive,
+exp+log, and a non-additive product case showing the limits of additive
+composition). Per-edge pre-activation sampling (`include_edges=True`) is
+also provided for the first hidden layer.
+
+Scope: 1–2 hidden layers; `x²`, `tanh`, `identity`, `relu` activations.
+Deeper networks and attention are documented out-of-scope in the issue.
+
 ## Files
 
 | File | Description |
 |------|-------------|
 | `eml_sr.py` | Symbolic regression engine + CLI (the product) |
 | `eml_sr_sklearn.py` | sklearn-style `EMLRegressor` for SRBench |
+| `eml_sr_distill.py` | Per-edge distillation of trained MLPs (issue #42) |
 | `eml_compiler.py` | Forward direction: elementary expression → EML tree |
 | `benchmarks/feynman.py` | Univariate Feynman-equation benchmark |
 | `benchmarks/pysr_compare.py` | Head-to-head vs PySR (opt-in via `PYSR_ENABLED=1`) |
+| `benchmarks/distill_demo.py` | Demo of per-edge MLP distillation (issue #42) |
 | `legacy/eml_executor.mojo` | Original parabolic-attention stack machine (archived) |
 | `legacy/test_eml.mojo` | 109-test bootstrap chain verification (archived) |
 | `ternary/` | §5 ternary-operator experiment (`T(x,y,z)`). See [`ternary/report.md`](ternary/report.md) for the VerifyBaseSet verdict. |
