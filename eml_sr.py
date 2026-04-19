@@ -921,18 +921,30 @@ class GrowingEMLTree(nn.Module):
 
     # --- growing ---
 
-    def split_leaf(self, leaf_idx: int, var_idx: int = 0) -> int:
-        """Replace ``leaf_idx`` with an eml subtree approximating
-        ``exp(x_{var_idx+1}) = eml(x_{var_idx+1}, 1)``.
+    def split_leaf(self, leaf_idx: int, var_idx: int = 0,
+                   left_bias: str = "variable") -> int:
+        """Replace ``leaf_idx`` with an eml subtree approximating an
+        elementary atom.
+
+        Two bias orientations are supported (issue #49):
+
+        * ``left_bias="variable"`` (default): new subtree is
+          ``eml(x_{var_idx+1}, 1) = exp(x_{var_idx+1})``. Good warm-start
+          for targets in the exp chain (exp, exp∘exp, ...).
+        * ``left_bias="terminal"``: new subtree is
+          ``eml(1, x_{var_idx+1}) = e - ln(x_{var_idx+1})``. Good warm-start
+          for targets whose canonical tree has a bare terminal on the
+          root's left — notably ``ln(x) = eml(1, eml(eml(1, x), 1))``.
+
+        Without this alternation the growing curriculum systematically
+        missed ``ln(x)`` at depth 3 even though ``discover`` at the same
+        budget nailed it.
 
         Args:
             leaf_idx: index of the leaf to split.
             var_idx: which input variable (0..n_vars-1) to route through
-                the new subtree. For n_vars=1 this is always 0, matching
-                the previous behavior. Caller is responsible for picking
-                this — typically the variable with the largest gradient
-                component at the splitting leaf (see
-                ``leaf_gradients()``).
+                the new subtree. For n_vars=1 this is always 0.
+            left_bias: ``"variable"`` or ``"terminal"`` — see above.
 
         Returns:
             The new internal node index. The old leaf's parameters are
@@ -944,22 +956,31 @@ class GrowingEMLTree(nn.Module):
             raise ValueError(
                 f"var_idx={var_idx} out of range for n_vars={self.n_vars}"
             )
+        if left_bias not in ("variable", "terminal"):
+            raise ValueError(
+                f"left_bias must be 'variable' or 'terminal', got {left_bias!r}"
+            )
         # Logit indices: 0 = "1", 1..n_vars = x1..xn, n_vars+1 = "child" (gate only)
         var_logit_idx = var_idx + 1
         child_logit_idx = self.n_vars + 1
 
-        # New leaves: left biased toward x_{var_idx+1}, right biased toward "1".
+        # New leaves: one biased toward x_{var_idx+1}, the other toward "1".
+        # ``left_bias`` picks which side carries the variable.
         new_l = self._new_leaf()
         new_r = self._new_leaf()
         with torch.no_grad():
             k = 4.0
-            # Left leaf → x_{var_idx+1}: strong weight on var_logit_idx, weak on rest.
             left_init = torch.full((self.n_vars + 1,), -k, dtype=REAL)
-            left_init[var_logit_idx] = k
-            self._params[self.nodes[new_l]["key"]].copy_(left_init)
-            # Right leaf → "1": strong weight on index 0.
             right_init = torch.full((self.n_vars + 1,), -k, dtype=REAL)
-            right_init[0] = k
+            if left_bias == "variable":
+                # eml(x, 1) = exp(x): left→x, right→1
+                left_init[var_logit_idx] = k
+                right_init[0] = k
+            else:  # "terminal"
+                # eml(1, x) = e - ln(x): left→1, right→x
+                left_init[0] = k
+                right_init[var_logit_idx] = k
+            self._params[self.nodes[new_l]["key"]].copy_(left_init)
             self._params[self.nodes[new_r]["key"]].copy_(right_init)
         # New internal gate: both sides route to "child", giving
         # eml(left_leaf, right_leaf) = eml(x_{var_idx+1}, 1) = exp(x_{var_idx+1}).
@@ -1281,12 +1302,24 @@ def discover_curriculum(
                   f"snap_rmse={math.sqrt(max(snap_mse, 0)):.3e} "
                   f"expr={snapped.to_expr()[:60]}")
 
+        # Track best snap seen during this seed's growth. Splits can degrade
+        # the tree (issue #49): a good subtree at split K can be destroyed by
+        # retraining at split K+1. Without this the final state wins even if
+        # an earlier state was much better. The seed's contribution is the
+        # best it ever produced, not the last thing it tried.
+        best_in_seed = {
+            "snapped": snapped,
+            "snap_mse": snap_mse,
+            "depth": tree.current_depth(),
+            "n_splits": 0,
+        }
+
         grow_step = 0
         # Cap to prevent runaway. A fully-grown depth-D tree has 2^D - 1
         # internal nodes, so at most 2^D - 2 splits from the initial 1-node tree.
         max_grow_steps = max(1, 2 ** max_depth - 2)
 
-        while (snap_mse >= success_threshold
+        while (best_in_seed["snap_mse"] >= success_threshold
                and tree.current_depth() < max_depth
                and grow_step < max_grow_steps):
             grow_step += 1
@@ -1309,7 +1342,13 @@ def discover_curriculum(
             # logits (indices 1..n_vars of the leaf's gradient vector).
             var_grads = grads[leaf_to_split][1:].abs()
             var_idx = int(torch.argmax(var_grads).item()) if n_vars > 1 else 0
-            tree.split_leaf(leaf_to_split, var_idx=var_idx)
+            # Alternate subtree bias by seed parity (issue #49). Even seeds
+            # warm-start new subtrees as eml(x, 1) = exp(x); odd seeds as
+            # eml(1, x) = e - ln(x). The latter is the canonical ln(x)
+            # shape on the root's left branch and was previously unreachable
+            # from the default bias.
+            left_bias = "terminal" if (seed % 2) else "variable"
+            tree.split_leaf(leaf_to_split, var_idx=var_idx, left_bias=left_bias)
 
             # New params → fresh optimizer state. Old Adam state referenced
             # dead params; re-initializing avoids stale-param issues.
@@ -1327,27 +1366,37 @@ def discover_curriculum(
             )
 
             snapped, snap_mse = _finalize_and_check()
+            if snap_mse < best_in_seed["snap_mse"]:
+                best_in_seed = {
+                    "snapped": snapped,
+                    "snap_mse": snap_mse,
+                    "depth": tree.current_depth(),
+                    "n_splits": grow_step,
+                }
             if verbose:
+                tag = " ★" if snap_mse <= best_in_seed["snap_mse"] else ""
                 print(f"  split #{grow_step} (var=x{var_idx+1}) → "
                       f"depth {d}: snap_rmse={math.sqrt(max(snap_mse, 0)):.3e} "
-                      f"expr={snapped.to_expr()[:60]}")
+                      f"expr={snapped.to_expr()[:60]}{tag}")
 
+        best_snapped = best_in_seed["snapped"]
+        best_mse = best_in_seed["snap_mse"]
         result = {
-            "snapped": snapped,
-            "snap_mse": snap_mse,
-            "snap_rmse": math.sqrt(max(snap_mse, 0)),
-            "depth": tree.current_depth(),
-            "expr": snapped.to_expr(),
-            "n_uncertain": tree.n_uncertain(),
-            "n_splits": grow_step,
+            "snapped": best_snapped,
+            "snap_mse": best_mse,
+            "snap_rmse": math.sqrt(max(best_mse, 0)),
+            "depth": best_in_seed["depth"],
+            "expr": best_snapped.to_expr(),
+            "n_uncertain": best_snapped.n_uncertain(),
+            "n_splits": best_in_seed["n_splits"],
             "seed": seed,
         }
 
-        if snap_mse < success_threshold:
+        if best_mse < success_threshold:
             if verbose:
                 print(f"\n  ✓ Found exact formula "
                       f"(seed {seed}, depth {result['depth']}, "
-                      f"splits={grow_step}): {result['expr']}")
+                      f"splits={result['n_splits']}): {result['expr']}")
             return {
                 "expr": result["expr"],
                 "depth": result["depth"],
